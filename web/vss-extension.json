@@ -1,0 +1,32 @@
+{
+    "manifestVersion": 1,
+    "id": "cherry-pick-promotion",
+    "publisher": "REPLACE-WITH-PUBLISHER-ID",
+    "version": "0.1.0",
+    "name": "Cherry-Pick Promotion",
+    "description": "Promote pull requests from one branch to another by cherry-picking them into a single pull request.",
+    "public": false,
+    "categories": ["Azure Repos"],
+    "tags": ["cherry-pick", "promotion", "pull request", "git"],
+    "targets": [{ "id": "Microsoft.VisualStudio.Services" }],
+    "scopes": ["vso.code_manage", "vso.work_write"],
+    "content": {
+        "details": { "path": "overview.md" },
+        "license": { "path": "dist/LICENSE" }
+    },
+    "files": [
+        { "path": "dist/extension", "addressable": true }
+    ],
+    "contributions": [
+        {
+            "id": "cherry-pick-promotion-hub",
+            "type": "ms.vss-web.hub",
+            "targets": ["ms.vss-code-web.code-hub-group"],
+            "properties": {
+                "name": "Cherry-Pick Promotion",
+                "uri": "dist/extension/index.html",
+                "iconName": "BranchFork2"
+            }
+        }
+    ]
+}

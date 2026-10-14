@@ -1,0 +1,31 @@
+{
+    "name": "cherry-pick-promotion",
+    "version": "0.1.0",
+    "private": true,
+    "license": "MIT",
+    "author": "Steven Zawaski",
+    "type": "module",
+    "scripts": {
+        "build": "node build.mjs",
+        "build:extension": "node build.mjs extension",
+        "build:standalone": "node build.mjs standalone",
+        "typecheck": "tsc",
+        "test": "vitest run",
+        "package": "node build.mjs extension && tfx extension create --manifest-globs vss-extension.json --output-path out"
+    },
+    "dependencies": {
+        "azure-devops-extension-sdk": "^4.0.2",
+        "monaco-editor": "^0.57.0",
+        "node-diff3": "^3.2.1",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1"
+    },
+    "devDependencies": {
+        "@types/react": "^18.3.31",
+        "@types/react-dom": "^18.3.7",
+        "esbuild": "^0.28.2",
+        "tfx-cli": "^0.24.2",
+        "typescript": "^5.9.3",
+        "vitest": "^5.0.4"
+    }
+}

@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CherryPickPromotion.WinForms</RootNamespace>
+    <AssemblyName>CherryPickPromotion</AssemblyName>
+    <WebDir>$(MSBuildThisFileDirectory)..\web\</WebDir>
+    <!-- The remembered PAT lives in %APPDATA%\Microsoft\UserSecrets\<this id>\secrets.json. -->
+    <UserSecretsId>ecd7977a-0e18-4efd-a1fc-6e1cc3f3434b</UserSecretsId>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Steven Zawaski</Authors>
+    <Company>KaKush LLC</Company>
+    <Copyright>KaKush LLC</Copyright>
+    <Product>Cherry-Pick Promotion</Product>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\LICENSE" Pack="true" PackagePath="\" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.13" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+  </ItemGroup>
+
+  <!-- Builds the web project first; it runs npm install and npm run build. -->
+  <ItemGroup>
+    <ProjectReference Include="..\web\CherryPickPromotion.Web.esproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- Copies the standalone web UI to wwwroot. Items are added here, after the web project built, so a clean build finds them. -->
+  <Target Name="CopyWeb" AfterTargets="ResolveProjectReferences">
+    <ItemGroup>
+      <WebFile Include="$(WebDir)dist\standalone\**" />
+      <Content Include="@(WebFile)" Link="wwwroot\%(WebFile.RecursiveDir)%(WebFile.Filename)%(WebFile.Extension)" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+  <!-- The WebView2 package always references its WPF control, which a WinForms app can't resolve. -->
+  <Target Name="RemoveWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+
+</Project>

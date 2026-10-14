@@ -1,0 +1,369 @@
+/* Azure DevOps theme variables (applied by the extension SDK) with light-theme fallbacks for the standalone host. */
+:root {
+    --cpp-bg: var(--background-color, #ffffff);
+    --cpp-text: var(--text-primary-color, rgba(0, 0, 0, 0.9));
+    --cpp-muted: var(--text-secondary-color, rgba(0, 0, 0, 0.55));
+    --cpp-accent: var(--communication-background, #0078d4);
+    --cpp-border: rgba(128, 128, 128, 0.3);
+    --cpp-hover: rgba(128, 128, 128, 0.08);
+    --cpp-error: #a4262c;
+    --cpp-success: #107c10;
+}
+
+html, body {
+    margin: 0;
+    background: var(--cpp-bg);
+    color: var(--cpp-text);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif;
+    font-size: 14px;
+}
+
+.cpp {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+}
+
+.cpp a {
+    color: var(--cpp-accent);
+    text-decoration: none;
+}
+
+.cpp a:hover {
+    text-decoration: underline;
+}
+
+.cpp-bar, .cpp-toolbar, .cpp-footer-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.cpp-toolbar {
+    align-items: center;
+}
+
+.cpp-bar label, .cpp-title {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--cpp-muted);
+}
+
+.cpp input:not([type]), .cpp select {
+    min-width: 220px;
+    padding: 6px 8px;
+    border: 1px solid var(--cpp-border);
+    border-radius: 2px;
+    background: var(--cpp-bg);
+    color: var(--cpp-text);
+    font: inherit;
+}
+
+.cpp button {
+    padding: 6px 14px;
+    border: 1px solid var(--cpp-border);
+    border-radius: 2px;
+    background: transparent;
+    color: var(--cpp-text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.cpp button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.cpp .cpp-primary {
+    border-color: var(--cpp-accent);
+    background: var(--cpp-accent);
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.cpp .cpp-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+}
+
+.cpp .cpp-icon:hover:not(:disabled) {
+    background: var(--cpp-hover);
+}
+
+.cpp .cpp-link {
+    border: none;
+    padding: 0;
+    color: var(--cpp-accent);
+    white-space: nowrap;
+}
+
+.cpp-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cpp-status {
+    padding: 8px 12px;
+    border-left: 4px solid var(--cpp-accent);
+    background: var(--cpp-hover);
+}
+
+.cpp-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 8px;
+    vertical-align: -1px;
+    border: 2px solid var(--cpp-border);
+    border-top-color: var(--cpp-accent);
+    border-radius: 50%;
+    animation: cpp-spin 0.8s linear infinite;
+}
+
+@keyframes cpp-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cpp-spinner {
+        animation-duration: 2.4s;
+    }
+}
+
+.cpp-status-error {
+    border-left-color: var(--cpp-error);
+}
+
+.cpp-status-success {
+    border-left-color: var(--cpp-success);
+}
+
+.cpp-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--cpp-border);
+}
+
+.cpp-item {
+    border-bottom: 1px solid var(--cpp-border);
+}
+
+.cpp-item:hover {
+    background: var(--cpp-hover);
+}
+
+.cpp-promoted {
+    opacity: 0.6;
+}
+
+.cpp-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 4px;
+}
+
+.cpp-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cpp-sha {
+    font-family: Consolas, "Courier New", monospace;
+}
+
+.cpp-meta, .cpp-summary {
+    color: var(--cpp-muted);
+    white-space: nowrap;
+}
+
+.cpp-workitems {
+    display: flex;
+    gap: 6px;
+}
+
+.cpp-tag {
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--cpp-hover);
+    color: var(--cpp-muted);
+    font-size: 12px;
+}
+
+.cpp-tag-done {
+    margin-left: 0;
+    background: rgba(16, 124, 16, 0.12);
+    color: var(--cpp-success);
+    white-space: nowrap;
+}
+
+.cpp-tag-conflict {
+    margin-left: 0;
+    background: rgba(164, 38, 44, 0.12);
+    color: var(--cpp-error);
+}
+
+.cpp-tag-open {
+    background: rgba(202, 80, 16, 0.12);
+    color: #ca5010;
+}
+
+/* Conflict editor: a full-window overlay over the list. */
+.cpp-conflict {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px;
+    background: var(--cpp-bg);
+}
+
+.cpp-conflict-header, .cpp-conflict-footer, .cpp-conflict-toolbar, .cpp-conflict-labels {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.cpp-conflict-footer {
+    justify-content: flex-end;
+    padding-top: 8px;
+    border-top: 1px solid var(--cpp-border);
+}
+
+.cpp-conflict-footer .cpp-meta {
+    margin-right: auto;
+}
+
+.cpp-conflict-labels {
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--cpp-muted);
+}
+
+.cpp-conflict-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+}
+
+.cpp-conflict-files {
+    width: 220px;
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+    list-style: none;
+    border-right: 1px solid var(--cpp-border);
+}
+
+.cpp .cpp-conflict-files button {
+    width: 100%;
+    border: none;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cpp .cpp-conflict-files .cpp-selected {
+    background: var(--cpp-hover);
+    font-weight: 600;
+}
+
+.cpp-conflict-count {
+    display: inline-block;
+    min-width: 18px;
+    color: var(--cpp-muted);
+}
+
+.cpp-conflict-main, .cpp-conflict-text {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.cpp-conflict-diff {
+    flex: 2;
+    min-height: 120px;
+    border: 1px solid var(--cpp-border);
+}
+
+.cpp-conflict-result {
+    flex: 3;
+    min-height: 160px;
+    border: 1px solid var(--cpp-border);
+}
+
+.cpp-conflict-whole {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cpp-conflict-marker {
+    background: rgba(128, 128, 128, 0.25);
+}
+
+.cpp-conflict-current {
+    background: rgba(0, 120, 212, 0.15);
+}
+
+.cpp-conflict-incoming {
+    background: rgba(16, 124, 16, 0.15);
+}
+
+.cpp-commits {
+    margin: 0;
+    padding: 0 4px 8px 36px;
+    list-style: none;
+}
+
+.cpp-commits li {
+    display: flex;
+    gap: 12px;
+    padding: 3px 0;
+}
+
+.cpp-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-top: 1px solid var(--cpp-border);
+    position: sticky;
+    bottom: 0;
+    padding: 12px 0;
+    background: var(--cpp-bg);
+}
+
+.cpp-title {
+    flex: 1;
+}
+
+.cpp-title input {
+    width: 100%;
+    box-sizing: border-box;
+}

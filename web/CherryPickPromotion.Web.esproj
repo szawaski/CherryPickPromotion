@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.VisualStudio.JavaScript.Sdk/1.0.6887863">
+
+  <PropertyGroup>
+    <BuildCommand>npm run build</BuildCommand>
+    <!-- The audit only flags tfx-cli's dependencies, a packaging tool that never ships; run npm audit by hand instead. -->
+    <ShouldRunNpmAudit>false</ShouldRunNpmAudit>
+    <BuildOutputFolder>$(MSBuildProjectDirectory)\dist</BuildOutputFolder>
+    <JavaScriptTestFramework>Vitest</JavaScriptTestFramework>
+    <JavaScriptTestRoot>test\</JavaScriptTestRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\LICENSE" Link="LICENSE" />
+  </ItemGroup>
+
+</Project>
