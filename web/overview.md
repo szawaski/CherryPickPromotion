@@ -10,6 +10,6 @@ The extension cherry-picks the selected items in the order they landed, onto a n
 
 Items already on the target are hidden. Items in an open pull request into the target, and open pull requests into the source, are shown but can't be selected. Merge commits are skipped; their changes come from the commits they merged.
 
-If a commit conflicts, a conflict editor opens so you can resolve it and carry on. Or skip it: the pull request then gets every selected item that landed before the conflicting one, and that item and the ones after it stay selected for later.
+If a commit conflicts, a conflict editor opens so you can resolve it and carry on. Or stop there: the pull request then gets every selected item that landed before the conflicting one, and that item and the ones after it stay selected for later.
 
 Licensed under MIT.

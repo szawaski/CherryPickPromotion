@@ -10,7 +10,7 @@ Promote work from a source branch to a target branch in Azure DevOps by cherry-p
 
 Already promoted items are hidden: their commits are on the target, in a completed pull request into the target, or cherry-picked by an earlier promotion (matched by author, author date and first line of the message). Items in an open pull request into the target are shown with **✓ in !N** and can't be selected. Open pull requests into the source are shown but can't be selected. Merge commits are skipped; their changes come from the commits they merged.
 
-If a commit conflicts, the conflict editor opens. It shows the target's and the incoming version side by side above an editable result, one conflict at a time. **Commit and continue** pushes the resolved commit (keeping its author, date and message) and the cherry-pick carries on. **Skip this item** stops there: the pull request gets every selected item that landed before it, and that item and the ones after it stay selected.
+If a commit conflicts, the conflict editor opens. It shows the target's and the incoming version side by side above an editable result, one conflict at a time. **Commit and continue** pushes the resolved commit (keeping its author, date and message) and the cherry-pick carries on. **Stop and create PR up to here** stops instead: the pull request gets every selected item that landed before the conflicting one, and that item and the ones after it stay selected.
 
 ## Layout
 

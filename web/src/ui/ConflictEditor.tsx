@@ -89,8 +89,8 @@ export default function ConflictEditor({ request, onDone }: Props) {
                     {unresolved === 0 ? "All conflicts resolved." : `${unresolved} conflicts left.`}
                     {request.autoMerged.length > 0 && ` ${request.autoMerged.length} other files merged on their own.`}
                 </span>
-                <button onClick={() => onDone("skip")} title="Stop here and open the pull request with the items before this one">
-                    Skip this item
+                <button onClick={() => onDone("skip")} title="Leave this item and everything after it out; they stay selected for next time">
+                    Stop and create PR up to here
                 </button>
                 <button className="cpp-primary" disabled={unresolved > 0} onClick={commitResolution}>
                     Commit and continue
