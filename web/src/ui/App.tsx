@@ -391,6 +391,11 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
     const count = selectable.filter(key => selected.has(key)).length;
     const isCollapsed = !expandAll && !expandedGroups.has(group.key);
     const workItem = group.workItem;
+    // Roll up where the items went: in an open promotion, or already on the target.
+    const inPromotion = all.filter(i => i.promotedIn !== undefined);
+    const promotedIn = [...new Set(inPromotion.map(i => i.promotedIn!))].sort((a, b) => a - b);
+    const onTarget = all.filter(i => i.promotedIn === undefined && !i.hasPendingCommits && !i.openPullRequest).length;
+    const done = inPromotion.length + onTarget;
     return (
         <li className="cpp-group">
             <div className="cpp-row cpp-group-row">
@@ -420,6 +425,21 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
                         </>
                     )}
                 </span>
+                {done > 0 && (
+                    <span className="cpp-tag cpp-tag-done">
+                        ✓ {done < all.length ? `${done} of ${all.length} ` : ""}
+                        {promotedIn.length > 0 ? "in " : "on target"}
+                        {promotedIn.map((id, i) => (
+                            <span key={id}>
+                                {i > 0 && ", "}
+                                <a href={pullRequestUrl(repository, id)} target="_blank" rel="noopener noreferrer">
+                                    !{id}
+                                </a>
+                            </span>
+                        ))}
+                        {promotedIn.length > 0 && onTarget > 0 ? " or on target" : ""}
+                    </span>
+                )}
                 <span className="cpp-meta">
                     {all.length} items{count > 0 ? ` · ${count} selected` : ""}
                 </span>
