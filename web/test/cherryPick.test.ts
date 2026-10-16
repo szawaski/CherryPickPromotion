@@ -1,6 +1,6 @@
 ﻿import { afterEach, describe, expect, it, vi } from "vitest";
 import { AdoClient, AdoError } from "../src/core/adoClient";
-import { buildPlan, createPromotionPullRequest, maxCommitsPerCherryPick } from "../src/core/promotion";
+import { buildPlan, createPromotionPullRequest, maxCommitsPerCherryPick, PromotionAborted } from "../src/core/promotion";
 import type { GitCherryPick, GitCommitRef, GitRepository } from "../src/core/types";
 
 const repository: GitRepository = { id: "repo", name: "repo", webUrl: "https://dev.azure.com/org/project/_git/repo" };
@@ -99,6 +99,24 @@ describe("createPromotionPullRequest", () => {
         expect(value.includedKeys).toEqual([`commit:${"a".repeat(40)}`]);
         expect(value.conflict?.itemKey).toBe(`commit:${"b".repeat(40)}`);
         expect(value.resolvedConflicts).toBe(0);
+    });
+
+    it("on an aborted conflict, creates no pull request and removes every branch", async () => {
+        const commits = ["c", "b", "a"].map((id, i, all) => ({ ...commit, commitId: id.repeat(40), comment: `change ${id}`, parents: i < all.length - 1 ? [all[i + 1].repeat(40)] : [] }));
+        const bigPlan = buildPlan("develop", "main", commits, [], { byMergeCommit: new Map(), byCommit: new Map() });
+        let picks = 0;
+        const createCherryPick = async () =>
+            ++picks === 1 ? { cherryPickId: 1, status: "failed", detailedStatus: { conflict: true, currentCommitId: "bbbbbb" } } : { cherryPickId: 2, status: "completed" };
+        const createPullRequest = vi.fn();
+        const deleteBranch = vi.fn(async () => {});
+        const client = fakeClient({ createCherryPick, createPullRequest, deleteBranch, getBranchHead: async () => "head", getCommitChanges: async () => [] });
+
+        const result = createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), "title", () => {}, async () => "abort");
+
+        await expect(result).rejects.toBeInstanceOf(PromotionAborted);
+        expect(createPullRequest).not.toHaveBeenCalled();
+        // The failed attempt and the branch brought up to just before the conflict.
+        expect(deleteBranch).toHaveBeenCalledTimes(2);
     });
 
     it("stops on the first failed status check and points at the branch", async () => {

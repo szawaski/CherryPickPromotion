@@ -1,21 +1,25 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from "react";
 import { AdoClient, shortBranchName } from "../core/adoClient";
-import type { FileResolution } from "../core/conflicts";
 import {
     analyzePromotion,
     commitUrl,
     createPromotionPullRequest,
+    createSyncPullRequest,
+    setAutoComplete,
+    findSyncPoint,
     defaultTitle,
     firstLine,
     pullRequestUrl,
     selectCommits,
     selectWorkItemIds,
     workItemUrl,
+    PromotionAborted,
+    type ConflictAnswer,
     type ConflictRequest,
     type ResolveConflict
 } from "../core/promotion";
 import type { GitPullRequest, GitRepository, PlanCommit, PlanItem, PromotionPlan } from "../core/types";
-import { groupByWorkItem, groupItems, loadWorkItems, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
+import { groupByWorkItem, groupItems, loadWorkItems, workItemMatches, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
 import "./styles.css";
 
 // Monaco is a few megabytes, so the editor loads the first time a conflict needs it.
@@ -23,7 +27,7 @@ const ConflictEditor = lazy(() => import("./ConflictEditor"));
 
 interface PendingConflict {
     request: ConflictRequest;
-    resolve(answer: ReadonlyMap<string, FileResolution> | "skip"): void;
+    resolve(answer: ConflictAnswer): void;
 }
 
 interface Props {
@@ -51,6 +55,7 @@ export function App({ client }: Props) {
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [showPromoted, setShowPromoted] = useState(false);
     const [groupByWorkItems, setGroupByWorkItems] = useState(saved.groupByWorkItem ?? false);
+    const [autoComplete, setAutoCompleteOption] = useState(saved.autoComplete ?? false);
     const [workItems, setWorkItems] = useState<WorkItemMap>(new Map());
     // Work item groups start collapsed.
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -110,6 +115,23 @@ export function App({ client }: Props) {
         saveSettings(storageKey, { ...loadSettings(storageKey), groupByWorkItem: value });
     }
 
+    function changeAutoComplete(value: boolean) {
+        setAutoCompleteOption(value);
+        saveSettings(storageKey, { ...loadSettings(storageKey), autoComplete: value });
+    }
+
+    /** Sets auto-complete when it's checked. The pull request stands either way, so a failure is only noted. */
+    async function applyAutoComplete(pullRequest: GitPullRequest, sync: boolean): Promise<string> {
+        if (!autoComplete || !repository) return "";
+        progress("Setting auto-complete…");
+        try {
+            await setAutoComplete(client, repository, pullRequest, sync);
+            return " Auto-complete is set.";
+        } catch (error) {
+            return ` Setting auto-complete failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+    }
+
     function changeRepository(id: string) {
         setPlan(undefined);
         setBranches([]);
@@ -140,7 +162,7 @@ export function App({ client }: Props) {
             setStatus({ kind: "error", message: "The source and target branches must be different." });
             return;
         }
-        saveSettings(storageKey, { repositoryId, sourceBranch, targetBranch, groupByWorkItem: groupByWorkItems });
+        saveSettings(storageKey, { repositoryId, sourceBranch, targetBranch, groupByWorkItem: groupByWorkItems, autoComplete });
         run(async () => {
             const result = await analyzePromotion(client, repository, sourceBranch, targetBranch, progress);
             setPlan(result);
@@ -159,10 +181,17 @@ export function App({ client }: Props) {
             const requested = plan.items.filter(i => selected.has(i.key) && i.hasPendingCommits).length;
             // Each conflict opens the editor; the cherry-pick waits until it's resolved or skipped.
             const resolveConflict: ResolveConflict = request => new Promise(resolve => setPendingConflict({ request, resolve }));
-            const result = await createPromotionPullRequest(client, repository, plan, selected, title.trim() || defaultTitle(plan, selected), progress, resolveConflict);
+            let result;
+            try {
+                result = await createPromotionPullRequest(client, repository, plan, selected, title.trim() || defaultTitle(plan, selected), progress, resolveConflict);
+            } catch (error) {
+                if (!(error instanceof PromotionAborted)) throw error;
+                setStatus({ kind: "info", message: "Aborted. No pull request was created, and the branches made along the way were removed." });
+                return;
+            }
             const id = result.pullRequest.pullRequestId;
             const included = new Set(result.includedKeys);
-            const resolvedNote = result.resolvedConflicts > 0 ? ` Resolved ${result.resolvedConflicts} conflicting commits.` : "";
+            const resolvedNote = (result.resolvedConflicts > 0 ? ` Resolved ${result.resolvedConflicts} conflicting commits.` : "") + (await applyAutoComplete(result.pullRequest, false));
 
             setPlan({ ...plan, items: plan.items.map(i => (included.has(i.key) ? { ...i, promotedIn: id, hasPendingCommits: false } : i)) });
             setSelected(new Set([...selected].filter(key => !included.has(key))));
@@ -182,12 +211,31 @@ export function App({ client }: Props) {
         });
     }
 
+    const syncSearch = useMemo(() => (plan ? findSyncPoint(plan) : {}), [plan]);
+    const syncPoint = syncSearch.point;
+    const syncBlocker = syncSearch.blockedBy;
+
+    function createSyncPull() {
+        if (!repository || !plan || !syncPoint) return;
+        run(async () => {
+            const pullRequest = await createSyncPullRequest(client, repository, plan, syncPoint, progress);
+            const autoCompleteNote = await applyAutoComplete(pullRequest, true);
+            setPlan({ ...plan, openSyncPullRequest: pullRequest });
+            setStatus({
+                kind: "success",
+                message: `Created sync pull request !${pullRequest.pullRequestId}. Complete it with Merge (no fast-forward), not squash, so the histories join.${autoCompleteNote}`,
+                link: pullRequestUrl(repository, pullRequest.pullRequestId)
+            });
+        });
+    }
+
     // A filter searches everything, including already promoted items.
     const query = filter.trim().toLowerCase().replace(/^[!#]/, "");
     // Newest first for display; cherry-picks still apply oldest first.
     // Items in an open promotion and open pull requests into the source stay visible, though they can't be selected.
     const shown = (i: PlanItem) => i.hasPendingCommits || i.promotedIn !== undefined || i.openPullRequest === true;
-    const visibleItems = plan ? plan.items.filter(i => (query ? matchesFilter(i, query) : showPromoted || shown(i))).reverse() : [];
+    // Loaded work items count too, parents included, so searching for a feature finds what's under it.
+    const visibleItems = plan ? plan.items.filter(i => (query ? matchesFilter(i, query) || workItemMatches(i, workItems, query) : showPromoted || shown(i))).reverse() : [];
     const hiddenCount = plan ? plan.items.filter(i => !shown(i)).length : 0;
     const selectedCommits = plan ? selectCommits(plan, selected).length : 0;
     const selectedWorkItems = plan ? selectWorkItemIds(plan, selected).length : 0;
@@ -290,6 +338,51 @@ export function App({ client }: Props) {
 
             {plan && repository && (
                 <>
+                    {plan.openSyncPullRequest ? (
+                        <div className="cpp-status">
+                            Sync pull request{" "}
+                            <a href={pullRequestUrl(repository, plan.openSyncPullRequest.pullRequestId)} target="_blank" rel="noopener noreferrer">
+                                !{plan.openSyncPullRequest.pullRequestId}
+                            </a>{" "}
+                            is open. Complete it with Merge (no fast-forward) and the commits before it drop off this list.
+                        </div>
+                    ) : (
+                        (syncPoint || syncBlocker) && (
+                            <div className="cpp-status cpp-sync">
+                                <span>
+                                    {syncPoint ? (
+                                        <>
+                                            Everything on {plan.sourceBranch} up to{" "}
+                                            <a className="cpp-sha" href={commitUrl(repository, syncPoint.commit.commitId)} target="_blank" rel="noopener noreferrer">
+                                                {syncPoint.commit.commitId.substring(0, 8)}
+                                            </a>{" "}
+                                            ({formatDate(syncPoint.commit.committer?.date ?? syncPoint.commit.author.date)}) is already on {plan.targetBranch}. Rebasing there takes{" "}
+                                            {syncPoint.commitCount} commits off this list.
+                                        </>
+                                    ) : (
+                                        <>Nothing to rebase onto yet: the oldest change on {plan.sourceBranch} isn't on {plan.targetBranch}.</>
+                                    )}
+                                    {syncBlocker && (
+                                        <>
+                                            {" "}
+                                            {syncPoint ? "It can move further once" : "Promote"}{" "}
+                                            <button className="cpp-link" title="Find it in the list" onClick={() => setFilter(syncBlocker.item?.pullRequest ? `!${syncBlocker.item.pullRequest.pullRequestId}` : syncBlocker.commit.commit.commitId.substring(0, 8))}>
+                                                {syncBlocker.item?.pullRequest ? `!${syncBlocker.item.pullRequest.pullRequestId}` : syncBlocker.commit.commit.commitId.substring(0, 8)} "
+                                                {syncBlocker.item?.pullRequest ? syncBlocker.item.pullRequest.title : firstLine(syncBlocker.commit.commit.comment)}"
+                                            </button>{" "}
+                                            {syncPoint ? "is on the target" : "first"}
+                                            {syncBlocker.commit.inOpenPullRequest !== undefined ? ` (it's in open !${syncBlocker.commit.inOpenPullRequest}, which needs completing)` : ""}.
+                                        </>
+                                    )}
+                                </span>
+                                {syncPoint && (
+                                    <button disabled={busy} onClick={createSyncPull}>
+                                        Rebase {plan.targetBranch} here
+                                    </button>
+                                )}
+                            </div>
+                        )
+                    )}
                     <section className="cpp-toolbar">
                         <label className="cpp-check">
                             <input
@@ -300,7 +393,14 @@ export function App({ client }: Props) {
                             />
                             Select all
                         </label>
-                        <input value={filter} placeholder="Search PRs, commits, people" onChange={e => setFilter(e.target.value)} />
+                        <span className="cpp-search">
+                            <input value={filter} placeholder="Search PRs, commits, people" onChange={e => setFilter(e.target.value)} onKeyDown={e => e.key === "Escape" && setFilter("")} />
+                            {filter && (
+                                <button className="cpp-search-clear" title="Clear search" aria-label="Clear search" onClick={() => setFilter("")}>
+                                    ×
+                                </button>
+                            )}
+                        </span>
                         {hiddenCount > 0 && (
                             <label className="cpp-check">
                                 <input type="checkbox" checked={showPromoted} disabled={query.length > 0} onChange={() => setShowPromoted(!showPromoted)} />
@@ -345,6 +445,10 @@ export function App({ client }: Props) {
                             <label className="cpp-title">
                                 Pull request title
                                 <input value={title} disabled={busy} onChange={e => setCustomTitle(e.target.value)} />
+                            </label>
+                            <label className="cpp-check" title="Complete the pull request on its own once its policies pass, and delete its branch">
+                                <input type="checkbox" checked={autoComplete} disabled={busy} onChange={() => changeAutoComplete(!autoComplete)} />
+                                Auto-complete
                             </label>
                             <span className="cpp-summary">
                                 {selected.size} items · {selectedCommits} commits · {selectedWorkItems} work items
@@ -573,6 +677,7 @@ interface Settings {
     sourceBranch?: string;
     targetBranch?: string;
     groupByWorkItem?: boolean;
+    autoComplete?: boolean;
 }
 
 function loadSettings(key: string): Settings {

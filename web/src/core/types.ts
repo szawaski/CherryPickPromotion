@@ -34,7 +34,8 @@ export interface GitCommitRef {
 /** A file a commit changed. changeType can combine flags, e.g. "edit, rename". */
 export interface GitChange {
     changeType: string;
-    item: { path: string; isFolder?: boolean; gitObjectType?: string };
+    /** objectId is the blob the commit left at the path (for a delete, the one it removed). */
+    item: { path: string; isFolder?: boolean; gitObjectType?: string; objectId?: string };
     /** The old path of a renamed file. */
     sourceServerItem?: string;
 }
@@ -61,7 +62,7 @@ export interface GitPullRequest {
     targetRefName: string;
     creationDate: string;
     closedDate?: string;
-    createdBy: { displayName: string };
+    createdBy: { displayName: string; id?: string };
     lastMergeCommit?: { commitId: string };
     repository?: { id: string; webUrl?: string };
 }
@@ -102,6 +103,8 @@ export interface PlanCommit {
     isMerge: boolean;
     /** Why the commit counts as already on the target, if it does. */
     promotedReason?: string;
+    /** Set when promotedReason is an open pull request into the target, so the change isn't on the target yet. */
+    inOpenPullRequest?: number;
 }
 
 export interface PlanItem {
@@ -139,4 +142,6 @@ export interface PromotionPlan {
     sourceBranch: string;
     targetBranch: string;
     items: PlanItem[];
+    /** An open sync pull request into the target, from createSyncPullRequest. */
+    openSyncPullRequest?: GitPullRequest;
 }

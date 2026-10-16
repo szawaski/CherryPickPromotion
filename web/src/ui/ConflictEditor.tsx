@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { conflictEnd, conflictMiddle, conflictStart, countConflicts, type ConflictFile, type FileResolution } from "../core/conflicts";
-import { firstLine, type ConflictRequest } from "../core/promotion";
+import { firstLine, type ConflictAnswer, type ConflictRequest } from "../core/promotion";
 import * as monaco from "./monaco";
 
 // Monaco's worker and styles are built next to this chunk (see build.mjs).
@@ -14,7 +14,7 @@ document.head.appendChild(stylesheet);
 
 interface Props {
     request: ConflictRequest;
-    onDone(answer: ReadonlyMap<string, FileResolution> | "skip"): void;
+    onDone(answer: ConflictAnswer): void;
 }
 
 interface Block {
@@ -89,6 +89,9 @@ export default function ConflictEditor({ request, onDone }: Props) {
                     {unresolved === 0 ? "All conflicts resolved." : `${unresolved} conflicts left.`}
                     {request.autoMerged.length > 0 && ` ${request.autoMerged.length} other files merged on their own.`}
                 </span>
+                <button onClick={() => onDone("abort")} title="Create no pull request and remove the branches made so far; the selection stays as it is">
+                    Abort
+                </button>
                 <button onClick={() => onDone("skip")} title="Leave this item and everything after it out; they stay selected for next time">
                     Stop and create PR up to here
                 </button>

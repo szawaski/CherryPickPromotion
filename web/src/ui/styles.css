@@ -368,6 +368,42 @@ html, body {
     box-sizing: border-box;
 }
 
+.cpp-search {
+    position: relative;
+    display: inline-flex;
+}
+
+.cpp-search input {
+    padding-right: 28px !important;
+}
+
+.cpp .cpp-search-clear {
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    transform: translateY(-50%);
+    color: var(--cpp-muted);
+    font-size: 18px;
+    line-height: 1;
+}
+
+.cpp .cpp-search-clear:hover {
+    background: var(--cpp-hover);
+    color: var(--cpp-text);
+}
+
+.cpp-sync {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
 .cpp-group-row {
     font-weight: 600;
 }

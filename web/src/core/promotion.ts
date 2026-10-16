@@ -24,8 +24,19 @@ export interface ConflictRequest {
     labels: ConflictLabels;
 }
 
-/** Resolves one conflicting commit: a resolution for every file in the request, or "skip" to stop before its item. */
-export type ResolveConflict = (request: ConflictRequest) => Promise<ReadonlyMap<string, FileResolution> | "skip">;
+/**
+ * Resolves one conflicting commit: a resolution for every file in the request, "skip" to stop before its item, or
+ * "abort" to give up without a pull request.
+ */
+export type ResolveConflict = (request: ConflictRequest) => Promise<ConflictAnswer>;
+export type ConflictAnswer = ReadonlyMap<string, FileResolution> | "skip" | "abort";
+
+/** Thrown when a promotion is aborted at a conflict. Its branches are removed and no pull request is created. */
+export class PromotionAborted extends Error {
+    constructor() {
+        super("Promotion aborted; no pull request was created.");
+    }
+}
 
 const parallelRequests = 8;
 const pollIntervalMs = 1500;
@@ -64,12 +75,18 @@ export async function analyzePromotion(client: AdoClient, repository: GitReposit
     // Earlier promotions by this tool, and every open pull request into the target (a pull request straight from the
     // source, or one from Azure DevOps's Cherry-pick button). Their commits are the originals or cherry-picks, which
     // keep the author, date and message. Reading them from the pull request still works after a squash merge.
+    // Sync pull requests hold the original commits rather than cherry-picks, possibly thousands of them, and every one is
+    // already on the target, so they're left out.
+    const syncPrefix = fullBranchName(syncBranchPrefix(targetBranch));
+    const isSync = (pr: GitPullRequest) => pr.sourceRefName.startsWith(syncPrefix);
     const promotions: Promotion[] = [];
-    await forEachParallel([...completedIntoTarget.filter(pr => pr.sourceRefName.startsWith(generatedPrefix)), ...activeIntoTarget], async pullRequest => {
+    await forEachParallel([...completedIntoTarget.filter(pr => pr.sourceRefName.startsWith(generatedPrefix)), ...activeIntoTarget].filter(pr => !isSync(pr)), async pullRequest => {
         promotions.push({ pullRequest, commits: await client.getPullRequestCommits(repository.id, pullRequest.pullRequestId) });
     });
 
     const plan = buildPlan(sourceBranch, targetBranch, sourceOnly, targetOnly, matches, promotions, activeIntoSource);
+    plan.openSyncPullRequest = activeIntoTarget.find(isSync);
+    await matchContentOnTarget(client, repository, plan, progress);
 
     const pullRequestItems = plan.items.filter(i => i.pullRequest);
     progress(`Loading work items for ${pullRequestItems.length} pull requests…`);
@@ -79,6 +96,67 @@ export async function analyzePromotion(client: AdoClient, repository: GitReposit
     });
 
     return plan;
+}
+
+/**
+ * Marks commits whose changes are already on the target by content, for promotions history can't trace, such as
+ * several pull requests squashed into one commit. A commit counts when, for every file it changes, the target has the
+ * version it left or the version a later source commit left (the target took a newer copy). Anything else, including a
+ * failed lookup, leaves the commit to promote.
+ */
+export async function matchContentOnTarget(client: AdoClient, repository: GitRepository, plan: PromotionPlan, progress: Progress): Promise<void> {
+    const pending = plan.items.flatMap(i => i.commits).filter(c => !c.isMerge && !c.promotedReason);
+    if (pending.length === 0) return;
+
+    progress(`Comparing the files of ${pending.length} commits with ${plan.targetBranch}…`);
+    // The blob each commit left at each path it touched; undefined for a delete.
+    const touched = new Map<PlanCommit, Map<string, string | undefined>>();
+    await forEachParallel(pending, async commit => {
+        try {
+            const changes = await client.getCommitChanges(repository.id, commit.commit.commitId);
+            const files = new Map<string, string | undefined>();
+            for (const change of changes) {
+                if (change.item.isFolder || change.item.gitObjectType === "tree") continue;
+                const deleted = change.changeType.includes("delete");
+                // Without the blob there's nothing to compare, so the commit stays to promote.
+                if (!deleted && !change.item.objectId) return;
+                files.set(change.item.path, deleted ? undefined : change.item.objectId);
+                if (change.changeType.includes("rename") && change.sourceServerItem) files.set(change.sourceServerItem, undefined);
+            }
+            if (files.size > 0) touched.set(commit, files);
+        } catch {
+            // left to promote
+        }
+    });
+
+    const paths = [...new Set([...touched.values()].flatMap(f => [...f.keys()]))];
+    progress(`Comparing ${paths.length} files with ${plan.targetBranch}…`);
+    const onTarget = new Map<string, string | undefined>();
+    const onSource = new Map<string, string | undefined>();
+    const failed = new Set<string>();
+    await forEachParallel(paths, async path => {
+        try {
+            const [target, source] = await Promise.all([client.getBranchObjectId(repository.id, path, plan.targetBranch), client.getBranchObjectId(repository.id, path, plan.sourceBranch)]);
+            onTarget.set(path, target);
+            onSource.set(path, source);
+        } catch {
+            failed.add(path);
+        }
+    });
+
+    const byOrder = [...touched].sort(([a], [b]) => a.order - b.order);
+    for (const [index, [commit, files]] of byOrder.entries()) {
+        const matches = [...files].every(([path, version]) => {
+            if (failed.has(path)) return false;
+            const target = onTarget.get(path);
+            if (target === version || target === onSource.get(path)) return true;
+            return byOrder.slice(index + 1).some(([, later]) => later.has(path) && later.get(path) === target);
+        });
+        if (matches) commit.promotedReason = `same file contents on ${plan.targetBranch}`;
+    }
+    for (const item of plan.items) {
+        if (item.commits.length > 0) item.hasPendingCommits = item.commits.some(c => !c.isMerge && !c.promotedReason);
+    }
 }
 
 /**
@@ -133,6 +211,7 @@ export function buildPlan(
         };
         return { planCommit, pullRequest };
     });
+    for (const { planCommit } of planned) planCommit.inOpenPullRequest = openPromotions.get(planCommit.commit.commitId);
 
     // A merge commit already on the target (Azure DevOps cherry-picks a pull request as its merge commit)
     // brings the commits it merged in with it. Newest first so nested merges pass the reason down.
@@ -144,7 +223,10 @@ export function buildPlan(
         const onMainline = reachable(byId, [mainline]);
         for (const id of reachable(byId, mergedIn)) {
             const merged = byId.get(id)!;
-            if (!onMainline.has(id) && !merged.promotedReason) merged.promotedReason = `merged in by ${merge.commit.commitId.substring(0, 8)}, which is ${merge.promotedReason}`;
+            if (!onMainline.has(id) && !merged.promotedReason) {
+                merged.promotedReason = `merged in by ${merge.commit.commitId.substring(0, 8)}, which is ${merge.promotedReason}`;
+                merged.inOpenPullRequest = merge.inOpenPullRequest;
+            }
         }
     }
 
@@ -311,6 +393,90 @@ export async function createPromotionPullRequest(
     }
 }
 
+export interface SyncPoint {
+    /** The newest commit on the source's first-parent line whose every change is already on the target. */
+    commit: GitCommitRef;
+    /** How many of the source-only commits a merge of it would take off the list. */
+    commitCount: number;
+}
+
+export interface SyncSearch {
+    point?: SyncPoint;
+    /** The oldest change that isn't on the target, which keeps the sync point from moving past it. */
+    blockedBy?: { commit: PlanCommit; item?: PlanItem };
+}
+
+/**
+ * The latest point where both branches have the same changes: the newest commit on the source's mainline such that
+ * every commit behind it that isn't on the target has an equivalent there (a completed promotion, a cherry-pick or the
+ * same change). Merging it into the target joins the histories, so later comparisons start from it. Commits only in an
+ * open pull request don't count, as they aren't on the target yet.
+ */
+export function findSyncPoint(plan: PromotionPlan): SyncSearch {
+    const commits = plan.items.flatMap(i => i.commits);
+    if (commits.length === 0) return {};
+    const byId = new Map(commits.map(c => [c.commit.commitId, c]));
+    const parents = new Set(commits.flatMap(c => c.commit.parents ?? []));
+    const head = commits.filter(c => !parents.has(c.commit.commitId)).sort((a, b) => b.order - a.order)[0];
+    if (!head) return {};
+
+    // The mainline, oldest first.
+    const mainline: PlanCommit[] = [];
+    for (let c: PlanCommit | undefined = head; c; c = byId.get(c.commit.parents?.[0] ?? "")) mainline.unshift(c);
+
+    // Each mainline commit brings in the ones behind it; once one of those isn't on the target, nothing later qualifies.
+    const behind = new Set<string>();
+    let point: SyncPoint | undefined;
+    for (const step of mainline) {
+        // Every commit this step brings in, oldest first, so the one reported is the oldest in the way.
+        const added = [...reachable(byId, [step.commit.commitId])].filter(id => !behind.has(id)).map(id => byId.get(id)!).sort((x, y) => x.order - y.order);
+        const blocking = added.find(c => !c.isMerge && (!c.promotedReason || c.inOpenPullRequest !== undefined));
+        if (blocking) return { point, blockedBy: { commit: blocking, item: plan.items.find(i => i.commits.includes(blocking)) } };
+        for (const c of added) behind.add(c.commit.commitId);
+        point = { commit: step.commit, commitCount: behind.size };
+    }
+    return { point };
+}
+
+/**
+ * Opens a pull request that merges the source, as of the sync point, into the target. It changes few or no files, but
+ * once it's completed as a merge the target has the source's history up to there.
+ */
+export async function createSyncPullRequest(client: AdoClient, repository: GitRepository, plan: PromotionPlan, point: SyncPoint, progress: Progress): Promise<GitPullRequest> {
+    const branch = `${syncBranchPrefix(plan.targetBranch)}${timestamp(new Date())}`;
+    const sha = point.commit.commitId.substring(0, 8);
+    progress(`Creating ${branch} at ${sha}…`);
+    await client.createBranch(repository.id, branch, point.commit.commitId);
+    progress("Creating the sync pull request…");
+    return withStep(`The branch ${branch} is ready, but creating the pull request`, () =>
+        client.createPullRequest(repository.id, {
+            sourceBranch: branch,
+            targetBranch: plan.targetBranch,
+            title: `Sync ${plan.sourceBranch} at ${sha} into ${plan.targetBranch}`,
+            description: [
+                `Every change on ${plan.sourceBranch} up to ${sha} is already on ${plan.targetBranch}, through promotions or cherry-picks. ` +
+                    `This merges ${plan.sourceBranch} as of ${sha} so the two branches share that history, and the next promotion only lists what came after it.`,
+                "",
+                "**Complete it with Merge (no fast-forward).** A squash merge would leave the histories apart and the commits listed again.",
+                "",
+                "Expect few or no file changes; any that show up are differences between the cherry-picks and the originals, such as conflict resolutions, and are worth a look."
+            ].join("\n"),
+            workItemIds: [],
+            mergeStrategy: "noFastForward"
+        })
+    );
+}
+
+/**
+ * Sets a pull request this tool created to complete on its own once its policies pass, deleting its generated branch.
+ * A sync pull request keeps its merge, since a squash would undo what it's for; promotions use the target's default.
+ */
+export async function setAutoComplete(client: AdoClient, repository: GitRepository, pullRequest: GitPullRequest, sync = false): Promise<void> {
+    const userId = pullRequest.createdBy.id;
+    if (!userId) throw new Error("Azure DevOps didn't say who created the pull request.");
+    await client.setAutoComplete(repository.id, pullRequest.pullRequestId, userId, { deleteSourceBranch: true, ...(sync ? { mergeStrategy: "noFastForward" as const } : {}) });
+}
+
 /**
  * Merges a conflicting commit onto a branch, asks for the conflicts to be resolved and pushes the result as a new branch
  * holding one commit with the original author, date and message. Returns that branch, or undefined if it was skipped.
@@ -336,6 +502,7 @@ async function resolveInteractively(
 
     progress(`Waiting for the conflicts in commit ${commitLabel(full)} to be resolved…`);
     const answer = await resolveConflict({ commit: full, item, files: prepared.conflicts, autoMerged: prepared.merged.map(m => m.path), labels });
+    if (answer === "abort") throw new PromotionAborted();
     if (answer === "skip") return undefined;
 
     progress(`Committing the resolved commit ${commitLabel(full)}…`);
@@ -404,6 +571,10 @@ export function firstLine(text: string): string {
 
 function generatedBranchPrefix(targetBranch: string): string {
     return `cherry-pick/${shortBranchName(targetBranch)}/`;
+}
+
+function syncBranchPrefix(targetBranch: string): string {
+    return `${generatedBranchPrefix(targetBranch)}sync/`;
 }
 
 /**

@@ -4,20 +4,24 @@
 
 Promote work from a source branch to a target branch in Azure DevOps by cherry-picking it into one pull request.
 
-1. Pick a repository, a source branch and a target branch, then **Find changes**.
-2. The tool lists the commits on the source that are not on the target, grouped by pull request, newest first. Commits without a pull request are listed on their own.
-3. Check what to promote and select **Cherry-pick**. The selected items are cherry-picked in the order they landed, onto a new `cherry-pick/<target>/<timestamp>-<n>` branch, and one pull request is opened into the target. It links every work item from the selected pull requests and commits.
+1. Pick a repository, source and target branch, then **Find changes**. Source-only commits are listed by pull request, newest first.
+2. Check what to promote and select **Cherry-pick**. Items are cherry-picked in landing order onto `cherry-pick/<target>/<timestamp>-<n>`, and one pull request is opened with their work items linked. The title defaults to `Promote <n> PRs <n> commits <source> to <target>`.
 
-Already promoted items are hidden: their commits are on the target, in a completed pull request into the target, or cherry-picked by an earlier promotion (matched by author, author date and first line of the message). Items in an open pull request into the target are shown with **✓ in !N** and can't be selected. Open pull requests into the source are shown but can't be selected. Merge commits are skipped; their changes come from the commits they merged.
+User-facing behavior is in [web/overview.md](web/overview.md). Implementation notes:
 
-If a commit conflicts, the conflict editor opens. It shows the target's and the incoming version side by side above an editable result, one conflict at a time. **Commit and continue** pushes the resolved commit (keeping its author, date and message) and the cherry-pick carries on. **Stop and create PR up to here** stops instead: the pull request gets every selected item that landed before the conflicting one, and that item and the ones after it stay selected.
+- **Already promoted** means the commit is on the target, in a completed PR into it, or matches a cherry-pick from an earlier promotion by author, author date and first message line. Then `matchContentOnTarget` checks file contents: a commit counts if the target's blob for every file it changed is the one it left, a later source version, or the source head's (deletes match when the file is gone). Lookups that fail leave the commit listed. It costs one changes call per remaining commit and two item lookups per file.
+- **Auto-complete** sets `autoCompleteSetBy` to the PR's creator with `deleteSourceBranch`. If that fails, the PR is kept and the status says why.
+- **Conflicts**: the editor pushes the resolved commit with its original author, date and message. **Abort** throws `PromotionAborted`, and the branches made so far are deleted.
+- **Group by work item** loads work items and their `System.Parent` chain through `wit/workitemsbatch` on first use. Work items that are deleted or unreadable show as "not found or no access".
+- **Rebase**: `findSyncPoint` walks the source's first-parent line and stops at the newest commit whose source-only ancestors (except merges) are all on the target; commits only in an open PR don't count. The sync PR comes from `cherry-pick/<target>/sync/<timestamp>` with `mergeStrategy: noFastForward`, and sync PRs are left out when reading earlier promotions.
+- Settings (repository, branches, grouping, auto-complete) are kept in local storage per project.
 
 ## Layout
 
 | Folder | What it is |
 | --- | --- |
 | `web` | `CherryPickPromotion.Web.esproj`. Building it runs `npm install` and `npm run build`. |
-| `web/src/core` | Azure DevOps REST calls and the promotion logic. The only copy of the logic. |
+| `web/src/core` | Azure DevOps REST calls, the promotion logic (`promotion.ts`) and work item grouping (`workItems.ts`). The only copy of the logic. |
 | `web/src/ui` | React UI shared by both hosts. |
 | `web/src/hosts/extension.tsx` | Azure DevOps extension entry. Calls run as the signed-in user. |
 | `web/src/hosts/standalone.tsx` | Entry for the WinForms app. |

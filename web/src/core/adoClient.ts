@@ -32,6 +32,8 @@ const commitPageSize = 1000;
 const pullRequestQueryChunk = 100;
 const workItemBatchSize = 200;
 
+export type MergeStrategy = "noFastForward" | "squash" | "rebase" | "rebaseMerge";
+
 export class AdoClient {
     constructor(readonly connection: AdoConnection) {}
 
@@ -194,6 +196,26 @@ export class AdoClient {
         }
     }
 
+    /** The blob id of a file at the head of a branch, or undefined when the file isn't there. */
+    async getBranchObjectId(repositoryId: string, path: string, branch: string): Promise<string | undefined> {
+        try {
+            const item = await this.send<{ objectId: string }>(
+                "GET",
+                this.gitUrl(`repositories/${repositoryId}/items`, {
+                    path,
+                    "versionDescriptor.version": shortBranchName(branch),
+                    "versionDescriptor.versionType": "branch",
+                    includeContent: false,
+                    $format: "json"
+                })
+            );
+            return item.objectId;
+        } catch (error) {
+            if (error instanceof AdoError && error.status === 404) return undefined;
+            throw error;
+        }
+    }
+
     /** A file's bytes at a commit, base64-encoded for a push. */
     async getFileBase64(repositoryId: string, path: string, commitId: string): Promise<string> {
         const response = await this.fetch(
@@ -216,12 +238,17 @@ export class AdoClient {
         });
     }
 
-    createPullRequest(repositoryId: string, request: { sourceBranch: string; targetBranch: string; title: string; workItemIds: number[] }): Promise<GitPullRequest> {
+    createPullRequest(
+        repositoryId: string,
+        request: { sourceBranch: string; targetBranch: string; title: string; description?: string; workItemIds: number[]; mergeStrategy?: MergeStrategy }
+    ): Promise<GitPullRequest> {
         return this.send("POST", this.gitUrl(`repositories/${repositoryId}/pullrequests`), {
             sourceRefName: fullBranchName(request.sourceBranch),
             targetRefName: fullBranchName(request.targetBranch),
             title: request.title,
-            workItemRefs: request.workItemIds.map(id => ({ id: String(id) }))
+            description: request.description,
+            workItemRefs: request.workItemIds.map(id => ({ id: String(id) })),
+            completionOptions: request.mergeStrategy ? { mergeStrategy: request.mergeStrategy } : undefined
         });
     }
 
@@ -247,6 +274,11 @@ export class AdoClient {
             }
         }
         return workItems;
+    }
+
+    /** Turns on auto-complete as userId, so the pull request completes once its policies pass. */
+    setAutoComplete(repositoryId: string, pullRequestId: number, userId: string, completionOptions: { deleteSourceBranch?: boolean; mergeStrategy?: MergeStrategy }): Promise<GitPullRequest> {
+        return this.send("PATCH", this.gitUrl(`repositories/${repositoryId}/pullrequests/${pullRequestId}`), { autoCompleteSetBy: { id: userId }, completionOptions });
     }
 
     private gitUrl(path: string, query: Query = {}): string {

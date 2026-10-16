@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdoClient } from "../src/core/adoClient";
 import type { PlanItem, WorkItem } from "../src/core/types";
-import { groupByWorkItem, groupItems, loadWorkItems, type WorkItemGroup } from "../src/core/workItems";
+import { groupByWorkItem, groupItems, loadWorkItems, workItemMatches, type WorkItemGroup } from "../src/core/workItems";
 
 const item = (key: string, workItemIds: number[]): PlanItem => ({ key, commits: [], workItemIds, hasPendingCommits: true });
 const workItem = (id: number, parentId?: number): WorkItem => ({ id, title: `WI ${id}`, type: "Task", state: "Active", parentId });
@@ -41,6 +41,22 @@ describe("groupByWorkItem", () => {
         expect(groups.map(g => g.id).sort()).toEqual([5, 6]);
         expect(groups.find(g => g.id === 5)!.workItem).toBeUndefined();
         expect(groupItems(groups.find(g => g.id === 6)!).map(i => i.key)).toEqual(["pr:1"]);
+    });
+});
+
+describe("workItemMatches", () => {
+    const workItems = new Map([
+        [1, { ...workItem(1), title: "Modernize Schedules UX", type: "Feature" }],
+        [10, workItem(10, 1)],
+        [100, workItem(100, 10)]
+    ]);
+
+    it("matches a parent's title or id", () => {
+        expect(workItemMatches(item("pr:1", [100]), workItems, "schedules")).toBe(true);
+        expect(workItemMatches(item("pr:1", [100]), workItems, "1")).toBe(true);
+        expect(workItemMatches(item("pr:1", [100]), workItems, "feature")).toBe(true);
+        expect(workItemMatches(item("pr:1", [100]), workItems, "billing")).toBe(false);
+        expect(workItemMatches(item("pr:2", []), workItems, "schedules")).toBe(false);
     });
 });
 

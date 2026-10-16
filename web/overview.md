@@ -2,14 +2,35 @@
 
 Promote work from one branch to another without merging the whole branch.
 
-1. Open **Repos > Cherry-Pick Promotion** and pick a repository, a source branch and a target branch.
-2. Select **Find changes**. You get the commits on the source branch that are not on the target, grouped by the pull request that brought them in, newest first. Commits without a pull request are listed on their own.
-3. Check the pull requests and commits to promote and select **Cherry-pick**.
+1. Open **Repos > Cherry-Pick Promotion** and pick a repository, source branch and target branch.
+2. Select **Find changes** to list what's on the source but not the target, grouped by pull request, newest first.
+3. Check what to promote and select **Cherry-pick**.
 
-The extension cherry-picks the selected items in the order they landed, onto a new branch, and opens one pull request into the target branch. The pull request links every work item from the selected pull requests and commits.
+The selected items are cherry-picked in order onto a new branch, and one pull request is opened into the target, linking their work items. The title follows your selection until you edit it. Check **Auto-complete** to have it complete once policies pass.
 
-Items already on the target are hidden. Items in an open pull request into the target, and open pull requests into the source, are shown but can't be selected. Merge commits are skipped; their changes come from the commits they merged.
+## What's listed
 
-If a commit conflicts, a conflict editor opens so you can resolve it and carry on. Or stop there: the pull request then gets every selected item that landed before the conflicting one, and that item and the ones after it stay selected for later.
+- Already promoted items are hidden, including ones squashed into a single commit on the target (matched by file contents).
+- Items in an open pull request into the target show **✓ in !N** and can't be selected.
+- Open pull requests into the source are shown but can't be selected.
+- Merge commits are skipped; their commits are listed instead.
+
+## Group by work item
+
+Shows the list as a tree of work items and their parents (task → backlog item → feature). Groups start collapsed.
+
+- An item linked to several work items appears under each; checking it once checks it everywhere.
+- A group's checkbox selects everything under it, and the group shows its items' status, e.g. **✓ 2 of 4 in !N**.
+- Search matches work item titles and numbers too, so searching for a feature finds everything under it.
+
+## Rebase the target
+
+Cherry-picks don't carry history, so old promoted commits keep being checked. When everything on the source up to a commit is already on the target, select **Rebase \<target\> here** to open a sync pull request from that commit.
+
+Complete it with **Merge (no fast-forward)**, not squash. It should change little or nothing, and afterwards the list starts from that point.
+
+## Conflicts
+
+A conflict opens an editor. You can resolve it and continue, **Stop and create PR up to here** (later items stay selected), or **Abort** with no pull request.
 
 Licensed under MIT.

@@ -74,6 +74,22 @@ export function groupItems(group: WorkItemGroup): PlanItem[] {
     return [...items.values()];
 }
 
+/**
+ * Whether the query (lowercase) is the id of, or part of the title or type of, one of the item's work items or
+ * their parents, so searching for a feature finds everything under it.
+ */
+export function workItemMatches(item: PlanItem, workItems: WorkItemMap, query: string): boolean {
+    const seen = new Set<number>();
+    for (const id of item.workItemIds) {
+        for (let current: number | undefined = id; current !== undefined && !seen.has(current); current = workItems.get(current)?.parentId) {
+            seen.add(current);
+            const workItem = workItems.get(current);
+            if (String(current) === query || workItem?.title.toLowerCase().includes(query) || workItem?.type.toLowerCase() === query) return true;
+        }
+    }
+    return false;
+}
+
 function hasCycle(parentId: number, id: number, workItems: WorkItemMap): boolean {
     const seen = new Set([id]);
     for (let p: number | undefined = parentId; p !== undefined; p = workItems.get(p)?.parentId) {
