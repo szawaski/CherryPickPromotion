@@ -52,7 +52,8 @@ export function App({ client }: Props) {
     const [showPromoted, setShowPromoted] = useState(false);
     const [groupByWorkItems, setGroupByWorkItems] = useState(saved.groupByWorkItem ?? false);
     const [workItems, setWorkItems] = useState<WorkItemMap>(new Map());
-    const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+    // Work item groups start collapsed.
+    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
     const [filter, setFilter] = useState("");
     const [conflictKey, setConflictKey] = useState<string>();
     const [pendingConflict, setPendingConflict] = useState<PendingConflict>();
@@ -326,10 +327,11 @@ export function App({ client }: Props) {
                                       group={group}
                                       repository={repository}
                                       selected={selected}
-                                      collapsed={collapsed}
+                                      expandedGroups={expandedGroups}
+                                      expandAll={query.length > 0}
                                       disabled={busy}
                                       onSelect={selectAll}
-                                      onCollapse={key => toggle(collapsed, key, setCollapsed)}
+                                      onExpand={key => toggle(expandedGroups, key, setExpandedGroups)}
                                       renderItem={renderItem}
                                   />
                               ))
@@ -373,24 +375,26 @@ interface WorkItemGroupRowProps {
     group: WorkItemGroup;
     repository: GitRepository;
     selected: ReadonlySet<string>;
-    collapsed: ReadonlySet<string>;
+    expandedGroups: ReadonlySet<string>;
+    /** While searching, every group is open so the matches show. */
+    expandAll: boolean;
     disabled: boolean;
     onSelect(keys: string[], value: boolean): void;
-    onCollapse(key: string): void;
+    onExpand(key: string): void;
     renderItem(item: PlanItem): ReactElement;
 }
 
 function WorkItemGroupRow(props: WorkItemGroupRowProps) {
-    const { group, repository, selected, collapsed, disabled, onSelect, onCollapse, renderItem } = props;
+    const { group, repository, selected, expandedGroups, expandAll, disabled, onSelect, onExpand, renderItem } = props;
     const all = groupItems(group);
     const selectable = all.filter(i => i.hasPendingCommits).map(i => i.key);
     const count = selectable.filter(key => selected.has(key)).length;
-    const isCollapsed = collapsed.has(group.key);
+    const isCollapsed = !expandAll && !expandedGroups.has(group.key);
     const workItem = group.workItem;
     return (
         <li className="cpp-group">
             <div className="cpp-row cpp-group-row">
-                <button className="cpp-link cpp-twisty" aria-expanded={!isCollapsed} aria-label={isCollapsed ? "Expand" : "Collapse"} onClick={() => onCollapse(group.key)}>
+                <button className="cpp-link cpp-twisty" aria-expanded={!isCollapsed} aria-label={isCollapsed ? "Expand" : "Collapse"} disabled={expandAll} onClick={() => onExpand(group.key)}>
                     {isCollapsed ? "▸" : "▾"}
                 </button>
                 <input
