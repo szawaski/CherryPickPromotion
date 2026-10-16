@@ -429,6 +429,7 @@ export function App({ client }: Props) {
                                       selected={selected}
                                       expandedGroups={expandedGroups}
                                       expandAll={query.length > 0}
+                                      conflictKey={conflictKey}
                                       disabled={busy}
                                       onSelect={selectAll}
                                       onExpand={key => toggle(expandedGroups, key, setExpandedGroups)}
@@ -482,6 +483,8 @@ interface WorkItemGroupRowProps {
     expandedGroups: ReadonlySet<string>;
     /** While searching, every group is open so the matches show. */
     expandAll: boolean;
+    /** The item a promotion stopped at, if any. */
+    conflictKey?: string;
     disabled: boolean;
     onSelect(keys: string[], value: boolean): void;
     onExpand(key: string): void;
@@ -489,7 +492,7 @@ interface WorkItemGroupRowProps {
 }
 
 function WorkItemGroupRow(props: WorkItemGroupRowProps) {
-    const { group, repository, selected, expandedGroups, expandAll, disabled, onSelect, onExpand, renderItem } = props;
+    const { group, repository, selected, expandedGroups, expandAll, conflictKey, disabled, onSelect, onExpand, renderItem } = props;
     const all = groupItems(group);
     const selectable = all.filter(i => i.hasPendingCommits).map(i => i.key);
     const count = selectable.filter(key => selected.has(key)).length;
@@ -500,6 +503,10 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
     const promotedIn = [...new Set(inPromotion.map(i => i.promotedIn!))].sort((a, b) => a - b);
     const onTarget = all.filter(i => i.promotedIn === undefined && !i.hasPendingCommits && !i.openPullRequest).length;
     const done = inPromotion.length + onTarget;
+    // And what's holding the rest back, so the reason shows without opening the group.
+    const openPullRequests = all.filter(i => i.openPullRequest).length;
+    const toPromote = selectable.length;
+    const hasConflict = conflictKey !== undefined && all.some(i => i.key === conflictKey);
     return (
         <li className="cpp-group">
             <div className="cpp-row cpp-group-row">
@@ -544,6 +551,14 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
                         {promotedIn.length > 0 && onTarget > 0 ? " or on target" : ""}
                     </span>
                 )}
+                {openPullRequests > 0 && (
+                    <span className="cpp-tag cpp-tag-open">
+                        {openPullRequests < all.length ? `${openPullRequests} of ${all.length} ` : ""}
+                        {openPullRequests === 1 ? "open PR" : "open PRs"}, not merged into source yet
+                    </span>
+                )}
+                {hasConflict && <span className="cpp-tag cpp-tag-conflict">conflicts</span>}
+                {toPromote > 0 && toPromote < all.length && <span className="cpp-tag">{toPromote} to promote</span>}
                 <span className="cpp-meta">
                     {all.length} items{count > 0 ? ` · ${count} selected` : ""}
                 </span>
