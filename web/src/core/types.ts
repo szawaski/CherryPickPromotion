@@ -127,6 +127,14 @@ export interface PromotionResult {
     resolvedConflicts: number;
 }
 
+export interface WorkItem {
+    id: number;
+    title: string;
+    type: string;
+    state: string;
+    parentId?: number;
+}
+
 export interface PromotionPlan {
     sourceBranch: string;
     targetBranch: string;

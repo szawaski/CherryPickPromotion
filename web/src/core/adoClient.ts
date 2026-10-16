@@ -9,7 +9,8 @@ import type {
     GitRef,
     GitRepository,
     PullRequestMatches,
-    ResourceRef
+    ResourceRef,
+    WorkItem
 } from "./types";
 
 export interface AdoConnection {
@@ -29,6 +30,7 @@ type Query = Record<string, string | number | boolean | undefined>;
 
 const commitPageSize = 1000;
 const pullRequestQueryChunk = 100;
+const workItemBatchSize = 200;
 
 export class AdoClient {
     constructor(readonly connection: AdoConnection) {}
@@ -223,13 +225,41 @@ export class AdoClient {
         });
     }
 
+    /** Work items by id with their parent; ones that are deleted or can't be read are left out. */
+    async getWorkItems(ids: number[]): Promise<WorkItem[]> {
+        const workItems: WorkItem[] = [];
+        for (let i = 0; i < ids.length; i += workItemBatchSize) {
+            const result = await this.send<{ value: ({ id: number; fields: Record<string, unknown> } | null)[] }>("POST", this.apiUrl("wit/workitemsbatch"), {
+                ids: ids.slice(i, i + workItemBatchSize),
+                fields: ["System.Title", "System.WorkItemType", "System.State", "System.Parent"],
+                errorPolicy: "omit"
+            });
+            for (const item of result.value) {
+                if (!item) continue;
+                const parent = item.fields["System.Parent"];
+                workItems.push({
+                    id: item.id,
+                    title: String(item.fields["System.Title"] ?? ""),
+                    type: String(item.fields["System.WorkItemType"] ?? ""),
+                    state: String(item.fields["System.State"] ?? ""),
+                    parentId: typeof parent === "number" ? parent : undefined
+                });
+            }
+        }
+        return workItems;
+    }
+
     private gitUrl(path: string, query: Query = {}): string {
+        return this.apiUrl(`git/${path}`, query);
+    }
+
+    private apiUrl(path: string, query: Query = {}): string {
         const params = new URLSearchParams();
         for (const [key, value] of Object.entries(query)) {
             if (value !== undefined) params.set(key, String(value));
         }
         params.set("api-version", "7.1");
-        return `${this.connection.baseUrl}${encodeURIComponent(this.connection.project)}/_apis/git/${path}?${params}`;
+        return `${this.connection.baseUrl}${encodeURIComponent(this.connection.project)}/_apis/${path}?${params}`;
     }
 
     private async send<T>(method: string, url: string, body?: unknown): Promise<T> {

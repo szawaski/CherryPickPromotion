@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from "react";
 import { AdoClient, shortBranchName } from "../core/adoClient";
 import type { FileResolution } from "../core/conflicts";
 import {
@@ -15,6 +15,7 @@ import {
     type ResolveConflict
 } from "../core/promotion";
 import type { GitPullRequest, GitRepository, PlanCommit, PlanItem, PromotionPlan } from "../core/types";
+import { groupByWorkItem, groupItems, loadWorkItems, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
 import "./styles.css";
 
 // Monaco is a few megabytes, so the editor loads the first time a conflict needs it.
@@ -49,6 +50,9 @@ export function App({ client }: Props) {
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [showPromoted, setShowPromoted] = useState(false);
+    const [groupByWorkItems, setGroupByWorkItems] = useState(saved.groupByWorkItem ?? false);
+    const [workItems, setWorkItems] = useState<WorkItemMap>(new Map());
+    const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
     const [filter, setFilter] = useState("");
     const [conflictKey, setConflictKey] = useState<string>();
     const [pendingConflict, setPendingConflict] = useState<PendingConflict>();
@@ -83,6 +87,28 @@ export function App({ client }: Props) {
         };
     }, [client, repositoryId, branchesVersion]);
 
+    // Work items load the first time they're grouped by, along with their parents.
+    const missingWorkItems = groupByWorkItems && plan ? [...new Set(plan.items.flatMap(i => i.workItemIds))].filter(id => !workItems.has(id)) : [];
+    useEffect(() => {
+        if (missingWorkItems.length === 0) return;
+        let current = true;
+        run(async () => {
+            progress(`Loading ${missingWorkItems.length} work items and their parents…`);
+            const result = await loadWorkItems(client, missingWorkItems, workItems);
+            if (!current) return;
+            setWorkItems(result);
+            setStatus(undefined);
+        });
+        return () => {
+            current = false;
+        };
+    }, [client, missingWorkItems.join(",")]);
+
+    function changeGrouping(value: boolean) {
+        setGroupByWorkItems(value);
+        saveSettings(storageKey, { ...loadSettings(storageKey), groupByWorkItem: value });
+    }
+
     function changeRepository(id: string) {
         setPlan(undefined);
         setBranches([]);
@@ -113,7 +139,7 @@ export function App({ client }: Props) {
             setStatus({ kind: "error", message: "The source and target branches must be different." });
             return;
         }
-        saveSettings(storageKey, { repositoryId, sourceBranch, targetBranch });
+        saveSettings(storageKey, { repositoryId, sourceBranch, targetBranch, groupByWorkItem: groupByWorkItems });
         run(async () => {
             const result = await analyzePromotion(client, repository, sourceBranch, targetBranch, progress);
             setPlan(result);
@@ -167,6 +193,31 @@ export function App({ client }: Props) {
     const title = customTitle ?? (plan ? defaultTitle(plan, selected) : "");
     const selectable = visibleItems.filter(i => i.hasPendingCommits);
     const allSelected = selectable.length > 0 && selectable.every(i => selected.has(i.key));
+
+    const groups = groupByWorkItems && missingWorkItems.length === 0 ? groupByWorkItem(visibleItems, workItems) : undefined;
+
+    function selectAll(keys: string[], value: boolean) {
+        const next = new Set(selected);
+        for (const key of keys) {
+            if (value) next.add(key);
+            else next.delete(key);
+        }
+        setSelected(next);
+    }
+
+    const renderItem = (item: PlanItem) => (
+        <ItemRow
+            key={item.key}
+            item={item}
+            repository={repository!}
+            checked={selected.has(item.key)}
+            expanded={expanded.has(item.key)}
+            conflict={item.key === conflictKey}
+            disabled={busy || !item.hasPendingCommits}
+            onCheck={() => toggle(selected, item.key, setSelected)}
+            onExpand={() => toggle(expanded, item.key, setExpanded)}
+        />
+    );
 
     function toggle(set: Set<string>, key: string, update: (value: Set<string>) => void) {
         const next = new Set(set);
@@ -254,7 +305,12 @@ export function App({ client }: Props) {
                                 <input type="checkbox" checked={showPromoted} disabled={query.length > 0} onChange={() => setShowPromoted(!showPromoted)} />
                                 Show {hiddenCount} already promoted
                             </label>
-                        )}                    </section>
+                        )}
+                        <label className="cpp-check">
+                            <input type="checkbox" checked={groupByWorkItems} disabled={busy} onChange={() => changeGrouping(!groupByWorkItems)} />
+                            Group by work item
+                        </label>
+                    </section>
 
                     {query.length > 0 && visibleItems.length === 0 && (
                         <div className="cpp-status">
@@ -263,19 +319,21 @@ export function App({ client }: Props) {
                     )}
 
                     <ol className="cpp-list">
-                        {visibleItems.map(item => (
-                            <ItemRow
-                                key={item.key}
-                                item={item}
-                                repository={repository}
-                                checked={selected.has(item.key)}
-                                expanded={expanded.has(item.key)}
-                                conflict={item.key === conflictKey}
-                                disabled={busy || !item.hasPendingCommits}
-                                onCheck={() => toggle(selected, item.key, setSelected)}
-                                onExpand={() => toggle(expanded, item.key, setExpanded)}
-                            />
-                        ))}
+                        {groups
+                            ? groups.map(group => (
+                                  <WorkItemGroupRow
+                                      key={group.key}
+                                      group={group}
+                                      repository={repository}
+                                      selected={selected}
+                                      collapsed={collapsed}
+                                      disabled={busy}
+                                      onSelect={selectAll}
+                                      onCollapse={key => toggle(collapsed, key, setCollapsed)}
+                                      renderItem={renderItem}
+                                  />
+                              ))
+                            : visibleItems.map(renderItem)}
                     </ol>
 
                     {/* Once there is a list, status lives in the sticky footer so it shows next to the button. */}
@@ -308,6 +366,69 @@ function BranchSelect({ branches, value, disabled, onChange }: { branches: strin
                 <option key={b} value={b}>{b}</option>
             ))}
         </select>
+    );
+}
+
+interface WorkItemGroupRowProps {
+    group: WorkItemGroup;
+    repository: GitRepository;
+    selected: ReadonlySet<string>;
+    collapsed: ReadonlySet<string>;
+    disabled: boolean;
+    onSelect(keys: string[], value: boolean): void;
+    onCollapse(key: string): void;
+    renderItem(item: PlanItem): ReactElement;
+}
+
+function WorkItemGroupRow(props: WorkItemGroupRowProps) {
+    const { group, repository, selected, collapsed, disabled, onSelect, onCollapse, renderItem } = props;
+    const all = groupItems(group);
+    const selectable = all.filter(i => i.hasPendingCommits).map(i => i.key);
+    const count = selectable.filter(key => selected.has(key)).length;
+    const isCollapsed = collapsed.has(group.key);
+    const workItem = group.workItem;
+    return (
+        <li className="cpp-group">
+            <div className="cpp-row cpp-group-row">
+                <button className="cpp-link cpp-twisty" aria-expanded={!isCollapsed} aria-label={isCollapsed ? "Expand" : "Collapse"} onClick={() => onCollapse(group.key)}>
+                    {isCollapsed ? "▸" : "▾"}
+                </button>
+                <input
+                    type="checkbox"
+                    checked={selectable.length > 0 && count === selectable.length}
+                    ref={el => {
+                        if (el) el.indeterminate = count > 0 && count < selectable.length;
+                    }}
+                    disabled={disabled || selectable.length === 0}
+                    onChange={() => onSelect(selectable, count < selectable.length)}
+                />
+                <span className="cpp-name">
+                    {group.id === undefined ? (
+                        "No work item"
+                    ) : (
+                        <>
+                            {workItem && <span className="cpp-wi-type">{workItem.type}</span>}
+                            <a href={workItemUrl(repository, group.id)} target="_blank" rel="noopener noreferrer">
+                                #{group.id}
+                            </a>{" "}
+                            {workItem ? workItem.title : <span className="cpp-meta">not found or no access</span>}
+                            {workItem?.state && <span className="cpp-tag">{workItem.state}</span>}
+                        </>
+                    )}
+                </span>
+                <span className="cpp-meta">
+                    {all.length} items{count > 0 ? ` · ${count} selected` : ""}
+                </span>
+            </div>
+            {!isCollapsed && (
+                <ol className="cpp-list cpp-group-children">
+                    {group.children.map(child => (
+                        <WorkItemGroupRow key={child.key} {...props} group={child} />
+                    ))}
+                    {group.items.map(renderItem)}
+                </ol>
+            )}
+        </li>
     );
 }
 
@@ -427,6 +548,7 @@ interface Settings {
     repositoryId?: string;
     sourceBranch?: string;
     targetBranch?: string;
+    groupByWorkItem?: boolean;
 }
 
 function loadSettings(key: string): Settings {

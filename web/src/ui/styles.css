@@ -367,3 +367,26 @@ html, body {
     width: 100%;
     box-sizing: border-box;
 }
+
+.cpp-group-row {
+    font-weight: 600;
+}
+
+.cpp-group-row .cpp-meta {
+    font-weight: normal;
+}
+
+.cpp .cpp-twisty {
+    width: 16px;
+    color: var(--cpp-muted);
+}
+
+.cpp-wi-type {
+    margin-right: 6px;
+    color: var(--cpp-muted);
+    font-size: 12px;
+}
+
+.cpp-group-children {
+    padding-left: 24px;
+}
