@@ -13,7 +13,7 @@ User-facing behavior is in [web/overview.md](web/overview.md). Implementation no
 - **Auto-complete** sets `autoCompleteSetBy` to the PR's creator with `deleteSourceBranch`. If that fails, the PR is kept and the status says why.
 - **Conflicts**: the editor pushes the resolved commit with its original author, date and message. **Abort** throws `PromotionAborted`, and the branches made so far are deleted.
 - **Group by work item** loads work items and their `System.Parent` chain through `wit/workitemsbatch` on first use. Work items that are deleted or unreadable show as "not found or no access".
-- **Rebase**: `findSyncPoint` walks the source's first-parent line and stops at the newest commit whose source-only ancestors (except merges) are all on the target; commits only in an open PR don't count. The sync PR comes from `cherry-pick/<target>/sync/<timestamp>` with `mergeStrategy: noFastForward`, and sync PRs are left out when reading earlier promotions.
+- **Rebase PR**: a pull request, not a direct rebase. `findSyncPoint` walks the source's first-parent line and stops at the newest commit whose source-only ancestors (except merges) are all on the target; commits only in an open PR don't count. The PR comes from `cherry-pick/<target>/sync/<timestamp>` with `mergeStrategy: noFastForward`, and these PRs are left out when reading earlier promotions.
 - Settings (repository, branches, grouping, auto-complete) are kept in local storage per project.
 
 ## Layout

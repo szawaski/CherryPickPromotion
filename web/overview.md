@@ -23,9 +23,9 @@ Shows the list as a tree of work items and their parents (task → backlog item 
 - A group's checkbox selects everything under it, and the group shows its items' status, e.g. **✓ 2 of 4 in !N**.
 - Search matches work item titles and numbers too, so searching for a feature finds everything under it.
 
-## Rebase the target
+## Rebase PR
 
-Cherry-picks don't carry history, so old promoted commits keep being checked. When everything on the source up to a commit is already on the target, select **Rebase \<target\> here** to open a sync pull request from that commit.
+Cherry-picks don't carry history, so old promoted commits keep being checked. When everything on the source up to a commit is already on the target, select **Create rebase PR into \<target\>**. This opens a pull request that merges the source, as of that commit, into the target. Nothing changes until it's completed.
 
 Complete it with **Merge (no fast-forward)**, not squash. It should change little or nothing, and afterwards the list starts from that point.
 

@@ -223,7 +223,7 @@ export function App({ client }: Props) {
             setPlan({ ...plan, openSyncPullRequest: pullRequest });
             setStatus({
                 kind: "success",
-                message: `Created sync pull request !${pullRequest.pullRequestId}. Complete it with Merge (no fast-forward), not squash, so the histories join.${autoCompleteNote}`,
+                message: `Created rebase PR !${pullRequest.pullRequestId}. Complete it with Merge (no fast-forward), not squash, so the histories join.${autoCompleteNote}`,
                 link: pullRequestUrl(repository, pullRequest.pullRequestId)
             });
         });
@@ -340,7 +340,7 @@ export function App({ client }: Props) {
                 <>
                     {plan.openSyncPullRequest ? (
                         <div className="cpp-status">
-                            Sync pull request{" "}
+                            Rebase PR{" "}
                             <a href={pullRequestUrl(repository, plan.openSyncPullRequest.pullRequestId)} target="_blank" rel="noopener noreferrer">
                                 !{plan.openSyncPullRequest.pullRequestId}
                             </a>{" "}
@@ -356,11 +356,11 @@ export function App({ client }: Props) {
                                             <a className="cpp-sha" href={commitUrl(repository, syncPoint.commit.commitId)} target="_blank" rel="noopener noreferrer">
                                                 {syncPoint.commit.commitId.substring(0, 8)}
                                             </a>{" "}
-                                            ({formatDate(syncPoint.commit.committer?.date ?? syncPoint.commit.author.date)}) is already on {plan.targetBranch}. Rebasing there takes{" "}
-                                            {syncPoint.commitCount} commits off this list.
+                                            ({formatDate(syncPoint.commit.committer?.date ?? syncPoint.commit.author.date)}) is already on {plan.targetBranch}. A rebase PR merging it into {plan.targetBranch} takes{" "}
+                                            {syncPoint.commitCount} commits off this list once completed.
                                         </>
                                     ) : (
-                                        <>Nothing to rebase onto yet: the oldest change on {plan.sourceBranch} isn't on {plan.targetBranch}.</>
+                                        <>No rebase PR possible yet: the oldest change on {plan.sourceBranch} isn't on {plan.targetBranch}.</>
                                     )}
                                     {syncBlocker && (
                                         <>
@@ -377,7 +377,7 @@ export function App({ client }: Props) {
                                 </span>
                                 {syncPoint && (
                                     <button disabled={busy} onClick={createSyncPull}>
-                                        Rebase {plan.targetBranch} here
+                                        Create rebase PR into {plan.targetBranch}
                                     </button>
                                 )}
                             </div>

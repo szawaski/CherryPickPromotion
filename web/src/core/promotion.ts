@@ -447,12 +447,12 @@ export async function createSyncPullRequest(client: AdoClient, repository: GitRe
     const sha = point.commit.commitId.substring(0, 8);
     progress(`Creating ${branch} at ${sha}…`);
     await client.createBranch(repository.id, branch, point.commit.commitId);
-    progress("Creating the sync pull request…");
+    progress("Creating the rebase PR…");
     return withStep(`The branch ${branch} is ready, but creating the pull request`, () =>
         client.createPullRequest(repository.id, {
             sourceBranch: branch,
             targetBranch: plan.targetBranch,
-            title: `Sync ${plan.sourceBranch} at ${sha} into ${plan.targetBranch}`,
+            title: `Rebase ${plan.targetBranch} on ${plan.sourceBranch} at ${sha}`,
             description: [
                 `Every change on ${plan.sourceBranch} up to ${sha} is already on ${plan.targetBranch}, through promotions or cherry-picks. ` +
                     `This merges ${plan.sourceBranch} as of ${sha} so the two branches share that history, and the next promotion only lists what came after it.`,
