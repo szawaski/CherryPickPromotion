@@ -52,7 +52,8 @@ export function App({ client }: Props) {
     const [filter, setFilter] = useState("");
     const [conflictKey, setConflictKey] = useState<string>();
     const [pendingConflict, setPendingConflict] = useState<PendingConflict>();
-    const [title, setTitle] = useState("");
+    // Undefined until edited, so the title follows the selection.
+    const [customTitle, setCustomTitle] = useState<string>();
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState<Status>();
 
@@ -119,7 +120,7 @@ export function App({ client }: Props) {
             setConflictKey(undefined);
             setSelected(new Set());
             setExpanded(new Set());
-            setTitle(defaultTitle(result));
+            setCustomTitle(undefined);
             const pending = result.items.filter(i => i.hasPendingCommits).length;
             setStatus({ kind: "info", message: pending === 0 ? `Nothing to promote from ${sourceBranch} to ${targetBranch}.` : `${pending} items to promote.` });
         });
@@ -131,7 +132,7 @@ export function App({ client }: Props) {
             const requested = plan.items.filter(i => selected.has(i.key) && i.hasPendingCommits).length;
             // Each conflict opens the editor; the cherry-pick waits until it's resolved or skipped.
             const resolveConflict: ResolveConflict = request => new Promise(resolve => setPendingConflict({ request, resolve }));
-            const result = await createPromotionPullRequest(client, repository, plan, selected, title.trim() || defaultTitle(plan), progress, resolveConflict);
+            const result = await createPromotionPullRequest(client, repository, plan, selected, title.trim() || defaultTitle(plan, selected), progress, resolveConflict);
             const id = result.pullRequest.pullRequestId;
             const included = new Set(result.includedKeys);
             const resolvedNote = result.resolvedConflicts > 0 ? ` Resolved ${result.resolvedConflicts} conflicting commits.` : "";
@@ -163,6 +164,7 @@ export function App({ client }: Props) {
     const hiddenCount = plan ? plan.items.filter(i => !shown(i)).length : 0;
     const selectedCommits = plan ? selectCommits(plan, selected).length : 0;
     const selectedWorkItems = plan ? selectWorkItemIds(plan, selected).length : 0;
+    const title = customTitle ?? (plan ? defaultTitle(plan, selected) : "");
     const selectable = visibleItems.filter(i => i.hasPendingCommits);
     const allSelected = selectable.length > 0 && selectable.every(i => selected.has(i.key));
 
@@ -282,7 +284,7 @@ export function App({ client }: Props) {
                         <div className="cpp-footer-row">
                             <label className="cpp-title">
                                 Pull request title
-                                <input value={title} disabled={busy} onChange={e => setTitle(e.target.value)} />
+                                <input value={title} disabled={busy} onChange={e => setCustomTitle(e.target.value)} />
                             </label>
                             <span className="cpp-summary">
                                 {selected.size} items · {selectedCommits} commits · {selectedWorkItems} work items

@@ -194,8 +194,10 @@ export function selectWorkItemIds(plan: PromotionPlan, selectedKeys: ReadonlySet
         .sort((a, b) => a - b);
 }
 
-export function defaultTitle(plan: PromotionPlan): string {
-    return `Promote ${plan.sourceBranch} to ${plan.targetBranch}`;
+export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): string {
+    const items = plan.items.filter(i => selectedKeys.has(i.key) && i.hasPendingCommits);
+    const pullRequests = items.filter(i => i.pullRequest).length;
+    return `Promote ${pullRequests} PRs ${items.length - pullRequests} commits ${plan.sourceBranch} to ${plan.targetBranch}`;
 }
 
 /**
