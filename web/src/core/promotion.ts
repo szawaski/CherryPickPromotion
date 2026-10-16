@@ -197,7 +197,8 @@ export function selectWorkItemIds(plan: PromotionPlan, selectedKeys: ReadonlySet
 export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): string {
     const items = plan.items.filter(i => selectedKeys.has(i.key) && i.hasPendingCommits);
     const pullRequests = items.filter(i => i.pullRequest).length;
-    return `Promote ${pullRequests} PRs ${items.length - pullRequests} commits ${plan.sourceBranch} to ${plan.targetBranch}`;
+    const commits = selectCommits(plan, selectedKeys).length;
+    return `Promote ${pullRequests} PRs ${commits} commits ${plan.sourceBranch} to ${plan.targetBranch}`;
 }
 
 /**
