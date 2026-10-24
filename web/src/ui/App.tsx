@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { AdoClient, shortBranchName } from "../core/adoClient";
 import {
     analyzePromotion,
@@ -9,16 +9,18 @@ import {
     findSyncPoint,
     defaultTitle,
     firstLine,
+    missingDependencies,
     pullRequestUrl,
     selectCommits,
     selectWorkItemIds,
+    withDependencies,
     workItemUrl,
     PromotionAborted,
     type ConflictAnswer,
     type ConflictRequest,
     type ResolveConflict
 } from "../core/promotion";
-import type { GitPullRequest, GitRepository, PlanCommit, PlanItem, PromotionPlan } from "../core/types";
+import type { GitPullRequest, GitRepository, ItemDependency, PlanCommit, PlanItem, PromotionPlan } from "../core/types";
 import { groupByWorkItem, groupItems, loadWorkItems, workItemMatches, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
 import "./styles.css";
 
@@ -64,7 +66,12 @@ export function App({ client }: Props) {
     const [pendingConflict, setPendingConflict] = useState<PendingConflict>();
     // Undefined until edited, so the title follows the selection.
     const [customTitle, setCustomTitle] = useState<string>();
+    // A work item linked to every promotion pull request, remembered until changed; its title prefixes the title.
+    const [workItemInput, setWorkItemInput] = useState(saved.workItemId === undefined ? "" : String(saved.workItemId));
+    const [linkedWorkItem, setLinkedWorkItem] = useState<LinkedWorkItem>();
     const [busy, setBusy] = useState(false);
+    // Set while finding changes, so it can be canceled.
+    const [findController, setFindController] = useState<AbortController>();
     const [status, setStatus] = useState<Status>();
 
     const repository = repositories.find(r => r.id === repositoryId);
@@ -93,6 +100,14 @@ export function App({ client }: Props) {
         };
     }, [client, repositoryId, branchesVersion]);
 
+    // A remembered search runs once on startup, when its repository and both branches are still there.
+    const autoFind = useRef(Boolean(saved.repositoryId && saved.sourceBranch && saved.targetBranch));
+    useEffect(() => {
+        if (!autoFind.current || busy || branches.length === 0) return;
+        autoFind.current = false;
+        if (repositoryId === saved.repositoryId && sourceBranch === saved.sourceBranch && targetBranch === saved.targetBranch) findChanges();
+    }, [branches, busy]);
+
     // Work items load the first time they're grouped by, along with their parents.
     const missingWorkItems = groupByWorkItems && plan ? [...new Set(plan.items.flatMap(i => i.workItemIds))].filter(id => !workItems.has(id)) : [];
     useEffect(() => {
@@ -109,6 +124,32 @@ export function App({ client }: Props) {
             current = false;
         };
     }, [client, missingWorkItems.join(",")]);
+
+    const workItemId = /^\d+$/.test(workItemInput.trim()) ? Number(workItemInput.trim()) : undefined;
+    useEffect(() => {
+        saveSettings(storageKey, { ...loadSettings(storageKey), workItemId });
+        if (workItemId === undefined) {
+            setLinkedWorkItem(undefined);
+            return;
+        }
+        setLinkedWorkItem({ id: workItemId, state: "loading" });
+        let current = true;
+        // Waits for typing to pause before looking it up.
+        const timer = setTimeout(async () => {
+            let title: string | undefined;
+            try {
+                title = (await client.getWorkItems([workItemId]))[0]?.title;
+            } catch {
+                // shown as not found
+            }
+            if (current) setLinkedWorkItem(title === undefined ? { id: workItemId, state: "missing" } : { id: workItemId, state: "found", title });
+        }, 400);
+        return () => {
+            current = false;
+            clearTimeout(timer);
+        };
+    }, [client, workItemId]);
+    const workItemTitle = linkedWorkItem?.state === "found" ? linkedWorkItem.title : undefined;
 
     function changeGrouping(value: boolean) {
         setGroupByWorkItems(value);
@@ -133,6 +174,7 @@ export function App({ client }: Props) {
     }
 
     function changeRepository(id: string) {
+        autoFind.current = false;
         setPlan(undefined);
         setBranches([]);
         setRepositoryId(id);
@@ -162,9 +204,25 @@ export function App({ client }: Props) {
             setStatus({ kind: "error", message: "The source and target branches must be different." });
             return;
         }
-        saveSettings(storageKey, { repositoryId, sourceBranch, targetBranch, groupByWorkItem: groupByWorkItems, autoComplete });
+        saveSettings(storageKey, { ...loadSettings(storageKey), repositoryId, sourceBranch, targetBranch, groupByWorkItem: groupByWorkItems, autoComplete });
+        const controller = new AbortController();
+        setFindController(controller);
         run(async () => {
-            const result = await analyzePromotion(client, repository, sourceBranch, targetBranch, progress);
+            let result;
+            try {
+                result = await analyzePromotion(client.withSignal(controller.signal), repository, sourceBranch, targetBranch, progress);
+            } catch (error) {
+                if (!controller.signal.aborted) throw error;
+                setStatus({ kind: "info", message: "Canceled finding changes." });
+                return;
+            } finally {
+                setFindController(undefined);
+            }
+            // Lookups that swallow errors can let a canceled search finish; its result is dropped.
+            if (controller.signal.aborted) {
+                setStatus({ kind: "info", message: "Canceled finding changes." });
+                return;
+            }
             setPlan(result);
             setConflictKey(undefined);
             setSelected(new Set());
@@ -177,13 +235,20 @@ export function App({ client }: Props) {
 
     function createPullRequest() {
         if (!repository || !plan) return;
+        if (workItemInput.trim() && linkedWorkItem?.state !== "found") {
+            setStatus({
+                kind: "error",
+                message: workItemId === undefined ? "The work item must be a number." : linkedWorkItem?.state === "missing" ? `Work item #${workItemId} wasn't found or you don't have access. Fix it or clear it.` : `Still loading work item #${workItemId}; try again in a moment.`
+            });
+            return;
+        }
         run(async () => {
             const requested = plan.items.filter(i => selected.has(i.key) && i.hasPendingCommits).length;
             // Each conflict opens the editor; the cherry-pick waits until it's resolved or skipped.
             const resolveConflict: ResolveConflict = request => new Promise(resolve => setPendingConflict({ request, resolve }));
             let result;
             try {
-                result = await createPromotionPullRequest(client, repository, plan, selected, title.trim() || defaultTitle(plan, selected), progress, resolveConflict);
+                result = await createPromotionPullRequest(client, repository, plan, selected, { title: title.trim() || defaultTitle(plan, selected, workItemTitle), workItemId }, progress, resolveConflict);
             } catch (error) {
                 if (!(error instanceof PromotionAborted)) throw error;
                 setStatus({ kind: "info", message: "Aborted. No pull request was created, and the branches made along the way were removed." });
@@ -238,8 +303,10 @@ export function App({ client }: Props) {
     const visibleItems = plan ? plan.items.filter(i => (query ? matchesFilter(i, query) || workItemMatches(i, workItems, query) : showPromoted || shown(i))).reverse() : [];
     const hiddenCount = plan ? plan.items.filter(i => !shown(i)).length : 0;
     const selectedCommits = plan ? selectCommits(plan, selected).length : 0;
-    const selectedWorkItems = plan ? selectWorkItemIds(plan, selected).length : 0;
-    const title = customTitle ?? (plan ? defaultTitle(plan, selected) : "");
+    const selectedWorkItems = plan ? new Set([...selectWorkItemIds(plan, selected), ...(workItemId === undefined ? [] : [workItemId])]).size : 0;
+    const missing = plan ? missingDependencies(plan, selected) : new Map<string, ItemDependency[]>();
+    const missingCount = new Set([...missing.values()].flatMap(d => d.map(x => x.key))).size;
+    const title = customTitle ?? (plan ? defaultTitle(plan, selected, workItemTitle) : "");
     const selectable = visibleItems.filter(i => i.hasPendingCommits);
     const allSelected = selectable.length > 0 && selectable.every(i => selected.has(i.key));
 
@@ -263,7 +330,9 @@ export function App({ client }: Props) {
             expanded={expanded.has(item.key)}
             conflict={item.key === conflictKey}
             disabled={busy || !item.hasPendingCommits}
+            needs={missing.get(item.key)}
             onCheck={() => toggle(selected, item.key, setSelected)}
+            onSelectNeeded={keys => setSelected(new Set([...selected, ...keys]))}
             onExpand={() => toggle(expanded, item.key, setExpanded)}
         />
     );
@@ -283,6 +352,11 @@ export function App({ client }: Props) {
                 <a href={status.link} target="_blank" rel="noopener noreferrer">
                     Open pull request
                 </a>
+            )}
+            {findController && status.kind === "info" && (
+                <button className="cpp-link cpp-cancel" onClick={() => findController.abort()}>
+                    Cancel
+                </button>
             )}
         </div>
     ) : busy ? (
@@ -443,6 +517,23 @@ export function App({ client }: Props) {
                     <section className="cpp-footer">
                         {statusBox}
                         <div className="cpp-footer-row">
+                            <label className="cpp-workitem" title="Linked to every pull request this creates, and its title goes in front of the pull request title. Remembered until you change it.">
+                                Work item
+                                <span className="cpp-workitem-row">
+                                    <input value={workItemInput} disabled={busy} inputMode="numeric" placeholder="ID" onChange={e => setWorkItemInput(e.target.value)} />
+                                    <span className={`cpp-workitem-title${linkedWorkItem?.state === "missing" || (workItemInput.trim() && workItemId === undefined) ? " cpp-workitem-missing" : ""}`}>
+                                        {workItemInput.trim() && workItemId === undefined
+                                            ? "not a number"
+                                            : linkedWorkItem?.state === "found"
+                                              ? <a href={workItemUrl(repository, linkedWorkItem.id)} title={linkedWorkItem.title} target="_blank" rel="noopener noreferrer">{linkedWorkItem.title}</a>
+                                              : linkedWorkItem?.state === "missing"
+                                                ? "not found or no access"
+                                                : linkedWorkItem
+                                                  ? "loading…"
+                                                  : ""}
+                                    </span>
+                                </span>
+                            </label>
                             <label className="cpp-title">
                                 Pull request title
                                 <input value={title} disabled={busy} onChange={e => setCustomTitle(e.target.value)} />
@@ -454,6 +545,16 @@ export function App({ client }: Props) {
                             <span className="cpp-summary">
                                 {selected.size} items · {selectedCommits} commits · {selectedWorkItems} work items
                             </span>
+                            {missingCount > 0 && (
+                                <button
+                                    className="cpp-link cpp-needs"
+                                    disabled={busy}
+                                    title="Earlier items that changed the same files; the selection was likely written on top of them"
+                                    onClick={() => setSelected(withDependencies(plan, selected))}
+                                >
+                                    ⚠ Add {missingCount} needed {missingCount === 1 ? "item" : "items"}
+                                </button>
+                            )}
                             <button className="cpp-primary" disabled={busy || selectedCommits === 0} onClick={createPullRequest}>
                                 Cherry-pick into {plan.targetBranch}
                             </button>
@@ -582,11 +683,14 @@ interface ItemRowProps {
     expanded: boolean;
     conflict: boolean;
     disabled: boolean;
+    /** Unselected earlier items this one likely needs. */
+    needs?: ItemDependency[];
     onCheck(): void;
     onExpand(): void;
+    onSelectNeeded(keys: string[]): void;
 }
 
-function ItemRow({ item, repository, checked, expanded, conflict, disabled, onCheck, onExpand }: ItemRowProps) {
+function ItemRow({ item, repository, checked, expanded, conflict, disabled, needs, onCheck, onExpand, onSelectNeeded }: ItemRowProps) {
     const pullRequest = item.pullRequest;
     const last = item.commits[item.commits.length - 1]?.commit;
     const dimmed = !item.hasPendingCommits && item.promotedIn === undefined;
@@ -606,6 +710,16 @@ function ItemRow({ item, repository, checked, expanded, conflict, disabled, onCh
                     </span>
                 )}
                 {conflict && <span className="cpp-tag cpp-tag-conflict">conflicts</span>}
+                {needs && (
+                    <button
+                        className="cpp-tag cpp-tag-needs"
+                        disabled={disabled}
+                        title={`Changes files that unselected earlier items changed first; select them too:\n${needs.map(d => `${itemLabel(d.key)}: ${d.paths.join(", ")}`).join("\n")}`}
+                        onClick={() => onSelectNeeded(needs.map(d => d.key))}
+                    >
+                        needs {needs.map(d => itemLabel(d.key)).join(", ")}
+                    </button>
+                )}
                 <span className="cpp-meta">
                     {pullRequest ? pullRequest.createdBy.displayName : last!.author.name} · {formatDate(pullRequest ? (pullRequest.closedDate ?? pullRequest.creationDate) : last!.author.date)}
                 </span>
@@ -666,6 +780,11 @@ function CommitSummary({ commit, repository, hideReason }: { commit: PlanCommit;
     );
 }
 
+/** "!123" for a pull request item, the short commit id for a commit item. */
+function itemLabel(key: string): string {
+    return key.startsWith("pr:") ? `!${key.substring(3)}` : key.substring("commit:".length, "commit:".length + 8);
+}
+
 function matchesFilter(item: PlanItem, query: string): boolean {
     const pullRequest = item.pullRequest;
     if (
@@ -687,7 +806,10 @@ function formatDate(value: string): string {
     return new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+type LinkedWorkItem = { id: number; state: "loading" | "missing" } | { id: number; state: "found"; title: string };
+
 interface Settings {
+    workItemId?: number;
     repositoryId?: string;
     sourceBranch?: string;
     targetBranch?: string;

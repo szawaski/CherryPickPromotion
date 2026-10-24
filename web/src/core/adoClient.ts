@@ -35,7 +35,15 @@ const workItemBatchSize = 200;
 export type MergeStrategy = "noFastForward" | "squash" | "rebase" | "rebaseMerge";
 
 export class AdoClient {
-    constructor(readonly connection: AdoConnection) {}
+    constructor(
+        readonly connection: AdoConnection,
+        private readonly signal?: AbortSignal
+    ) {}
+
+    /** A client whose requests stop, throwing an AbortError, once signal is aborted. */
+    withSignal(signal: AbortSignal): AdoClient {
+        return new AdoClient(this.connection, signal);
+    }
 
     async getRepositories(): Promise<GitRepository[]> {
         const result = await this.send<{ value: GitRepository[] }>("GET", this.gitUrl("repositories"));
@@ -300,10 +308,11 @@ export class AdoClient {
     }
 
     private async fetch(method: string, url: string, body?: unknown, accept = "application/json"): Promise<Response> {
+        this.signal?.throwIfAborted();
         const headers: Record<string, string> = { Accept: accept, ...(await this.connection.getHeaders()) };
         if (body !== undefined) headers["Content-Type"] = "application/json";
 
-        const response = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+        const response = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: this.signal });
         if (!response.ok) {
             const request = `${method} ${url.split("/_apis/")[1]?.split("?")[0] ?? url}`;
             let detail = "";

@@ -220,6 +220,20 @@ html, body {
     color: var(--cpp-error);
 }
 
+.cpp .cpp-tag-needs, .cpp .cpp-needs {
+    color: #ca5010;
+    white-space: nowrap;
+}
+
+.cpp .cpp-tag-needs {
+    margin-left: 0;
+    padding: 1px 6px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(202, 80, 16, 0.12);
+    font-size: 12px;
+}
+
 .cpp-tag-open {
     background: rgba(202, 80, 16, 0.12);
     color: #ca5010;
@@ -361,6 +375,48 @@ html, body {
 
 .cpp-title {
     flex: 1;
+}
+
+.cpp .cpp-cancel {
+    margin-left: 12px;
+}
+
+.cpp-workitem {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--cpp-muted);
+    white-space: nowrap;
+}
+
+/* The title sits beside the box, so the box lines up with the pull request title's. */
+.cpp-workitem-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cpp .cpp-workitem input {
+    min-width: 0;
+    width: 100px;
+}
+
+.cpp-workitem-title {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    font-weight: normal;
+}
+
+.cpp-workitem-title:empty {
+    display: none;
+}
+
+.cpp-workitem-missing {
+    color: var(--cpp-error);
 }
 
 .cpp-title input {

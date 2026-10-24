@@ -4,6 +4,7 @@ import type {
     GitCommitRef,
     GitPullRequest,
     GitRepository,
+    ItemDependency,
     PlanCommit,
     PlanItem,
     Promotion,
@@ -44,6 +45,9 @@ const cherryPickTimeoutMs = 10 * 60 * 1000;
 // Azure DevOps returns a 500 reading back a cherry-pick whose request is over about 4,000 characters; each commit
 // adds about 55.
 export const maxCommitsPerCherryPick = 50;
+// Azure DevOps rejects a pull request description over 4,000 characters.
+export const maxDescriptionLength = 4000;
+const minDescriptionLineLength = 20;
 
 export async function analyzePromotion(client: AdoClient, repository: GitRepository, sourceBranch: string, targetBranch: string, progress: Progress): Promise<PromotionPlan> {
     progress("Finding commits on the source branch that are not on the target branch…");
@@ -157,6 +161,60 @@ export async function matchContentOnTarget(client: AdoClient, repository: GitRep
     for (const item of plan.items) {
         if (item.commits.length > 0) item.hasPendingCommits = item.commits.some(c => !c.isMerge && !c.promotedReason);
     }
+    findDependencies(plan, touched, onTarget, failed);
+}
+
+/**
+ * Sets dependsOn: for each file a commit to promote changes, the earlier commits to promote in its history that changed
+ * the file after the version the target has. The commit was written on top of their changes, so without them it likely
+ * conflicts. Changes to different lines of the same file count too, so this errs toward warning.
+ */
+function findDependencies(plan: PromotionPlan, touched: Map<PlanCommit, Map<string, string | undefined>>, onTarget: Map<string, string | undefined>, failed: Set<string>): void {
+    const pending = [...touched].filter(([c]) => !c.promotedReason).sort(([a], [b]) => a.order - b.order);
+    const itemOf = new Map(plan.items.flatMap(i => i.commits.map(c => [c, i] as const)));
+    const byId = new Map(plan.items.flatMap(i => i.commits).map(c => [c.commit.commitId, c]));
+
+    for (const [index, [commit, files]] of pending.entries()) {
+        const item = itemOf.get(commit)!;
+        let ancestors: Set<string> | undefined;
+        for (const path of files.keys()) {
+            // Newest first, back to the version the target already has.
+            for (let i = index - 1; i >= 0; i--) {
+                const [earlier, earlierFiles] = pending[i];
+                if (!earlierFiles.has(path)) continue;
+                ancestors ??= reachable(byId, commit.commit.parents ?? []);
+                if (!ancestors.has(earlier.commit.commitId)) continue;
+                if (!failed.has(path) && earlierFiles.get(path) === onTarget.get(path)) break;
+                const other = itemOf.get(earlier)!;
+                if (other === item) continue;
+                item.dependsOn ??= [];
+                let dependency = item.dependsOn.find(d => d.key === other.key);
+                if (!dependency) item.dependsOn.push((dependency = { key: other.key, paths: [] }));
+                if (!dependency.paths.includes(path)) dependency.paths.push(path);
+            }
+        }
+    }
+}
+
+/** The items the selected ones depend on that aren't selected and still have commits to promote, by selected item key. */
+export function missingDependencies(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): Map<string, ItemDependency[]> {
+    const pending = new Set(plan.items.filter(i => i.hasPendingCommits).map(i => i.key));
+    const missing = new Map<string, ItemDependency[]>();
+    for (const item of plan.items) {
+        if (!selectedKeys.has(item.key) || !item.hasPendingCommits) continue;
+        const needed = (item.dependsOn ?? []).filter(d => pending.has(d.key) && !selectedKeys.has(d.key));
+        if (needed.length > 0) missing.set(item.key, needed);
+    }
+    return missing;
+}
+
+/** The selection plus everything it depends on, directly or not. */
+export function withDependencies(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): Set<string> {
+    const result = new Set(selectedKeys);
+    for (let missing = missingDependencies(plan, result); missing.size > 0; missing = missingDependencies(plan, result)) {
+        for (const dependencies of missing.values()) for (const d of dependencies) result.add(d.key);
+    }
+    return result;
 }
 
 /**
@@ -276,11 +334,50 @@ export function selectWorkItemIds(plan: PromotionPlan, selectedKeys: ReadonlySet
         .sort((a, b) => a - b);
 }
 
-export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): string {
+/** The templated title, after the linked work item's title when there is one. */
+export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<string>, workItemTitle?: string): string {
     const items = plan.items.filter(i => selectedKeys.has(i.key) && i.hasPendingCommits);
     const pullRequests = items.filter(i => i.pullRequest).length;
     const commits = selectCommits(plan, selectedKeys).length;
-    return `Promote ${pullRequests} PRs ${commits} commits ${plan.sourceBranch} to ${plan.targetBranch}`;
+    const title = `Promote ${pullRequests} PRs ${commits} commits ${plan.sourceBranch} to ${plan.targetBranch}`;
+    return workItemTitle?.trim() ? `${workItemTitle.trim()}: ${title}` : title;
+}
+
+/** A list of the items' titles: the pull request's, or a commit's first line. */
+export function promotionDescription(items: PlanItem[], max = maxDescriptionLength): string {
+    return fitLines(
+        items.map(i => `- ${(i.pullRequest ? i.pullRequest.title : firstLine(i.commits[0].commit.comment)).trim()}`),
+        max
+    );
+}
+
+/**
+ * Joins the lines within max characters. Too long, the longest lines are shortened to the same width, so every line
+ * keeps its start. If they don't fit even at minDescriptionLineLength, the last ones are replaced by a count.
+ */
+export function fitLines(lines: string[], max: number): string {
+    const length = (width: number, count: number) => lines.slice(0, count).reduce((sum, l) => sum + Math.min(l.length, width), 0) + Math.max(0, count - 1);
+    if (length(Infinity, lines.length) <= max) return lines.join("\n");
+
+    if (length(minDescriptionLineLength, lines.length) <= max) {
+        let low = minDescriptionLineLength;
+        let high = Math.max(...lines.map(l => l.length));
+        while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            if (length(mid, lines.length) <= max) low = mid;
+            else high = mid - 1;
+        }
+        return lines.map(l => truncate(l, low)).join("\n");
+    }
+
+    const more = (count: number) => `- …and ${lines.length - count} more`;
+    let count = lines.length - 1;
+    while (count > 0 && length(minDescriptionLineLength, count) + 1 + more(count).length > max) count--;
+    return [...lines.slice(0, count).map(l => truncate(l, minDescriptionLineLength)), more(count)].join("\n");
+}
+
+function truncate(text: string, width: number): string {
+    return text.length <= width ? text : `${text.substring(0, width - 1).trimEnd()}…`;
 }
 
 /**
@@ -289,14 +386,14 @@ export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<stri
  * The commits go in chunks of maxCommitsPerCherryPick, each onto the branch the previous chunk made. On a conflict,
  * resolveConflict (when given) gets to resolve it, and the resolved commit is pushed before carrying on. If it's skipped,
  * or there is no resolveConflict, only the items that landed before the conflicting one are kept, so the pull request
- * holds everything up to it and no item is promoted halfway.
+ * holds everything up to it and no item is promoted halfway. Its description lists the included items' titles.
  */
 export async function createPromotionPullRequest(
     client: AdoClient,
     repository: GitRepository,
     plan: PromotionPlan,
     selectedKeys: ReadonlySet<string>,
-    title: string,
+    details: { title: string; /** Linked on top of the items' work items. */ workItemId?: number },
     progress: Progress,
     resolveConflict?: ResolveConflict
 ): Promise<PromotionResult> {
@@ -372,8 +469,9 @@ export async function createPromotionPullRequest(
             client.createPullRequest(repository.id, {
                 sourceBranch: finalBranch!,
                 targetBranch: plan.targetBranch,
-                title,
-                workItemIds: selectWorkItemIds(plan, included)
+                title: details.title,
+                description: promotionDescription(items.filter(i => included.has(i.key))),
+                workItemIds: details.workItemId === undefined ? selectWorkItemIds(plan, included) : mergeIds(selectWorkItemIds(plan, included), [details.workItemId])
             })
         );
         return { pullRequest, includedKeys: [...included], conflict, resolvedConflicts };

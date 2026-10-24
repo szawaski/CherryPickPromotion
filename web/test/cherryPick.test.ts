@@ -18,7 +18,7 @@ function fakeClient(overrides: Partial<Record<keyof AdoClient, unknown>>): AdoCl
 }
 
 async function run(client: AdoClient) {
-    const result = createPromotionPullRequest(client, repository, plan, selected, "title", () => {});
+    const result = createPromotionPullRequest(client, repository, plan, selected, { title: "title" }, () => {});
     const settled = result.then(
         value => ({ value }),
         error => ({ error: error as Error })
@@ -66,7 +66,7 @@ describe("createPromotionPullRequest", () => {
                 calls.push(`push "${pushed.comment}" to ${branch.slice(-2)} (${pushed.changes.length} changes)`)
         });
 
-        const value = await createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), "title", () => {}, resolveConflict);
+        const value = await createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), { title: "title" }, () => {}, resolveConflict);
 
         expect(calls).toEqual([
             "cherry-pick abcd onto main as -1",
@@ -94,7 +94,7 @@ describe("createPromotionPullRequest", () => {
             pushCommit: vi.fn()
         });
 
-        const value = await createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), "title", () => {}, async () => "skip");
+        const value = await createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), { title: "title" }, () => {}, async () => "skip");
 
         expect(value.includedKeys).toEqual([`commit:${"a".repeat(40)}`]);
         expect(value.conflict?.itemKey).toBe(`commit:${"b".repeat(40)}`);
@@ -111,7 +111,7 @@ describe("createPromotionPullRequest", () => {
         const deleteBranch = vi.fn(async () => {});
         const client = fakeClient({ createCherryPick, createPullRequest, deleteBranch, getBranchHead: async () => "head", getCommitChanges: async () => [] });
 
-        const result = createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), "title", () => {}, async () => "abort");
+        const result = createPromotionPullRequest(client, repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), { title: "title" }, () => {}, async () => "abort");
 
         await expect(result).rejects.toBeInstanceOf(PromotionAborted);
         expect(createPullRequest).not.toHaveBeenCalled();
@@ -146,7 +146,7 @@ describe("createPromotionPullRequest", () => {
                 : { cherryPickId: 2, status: "completed" };
         });
 
-        const value = await createPromotionPullRequest(fakeClient({ createCherryPick }), repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), "title", () => {});
+        const value = await createPromotionPullRequest(fakeClient({ createCherryPick }), repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), { title: "title" }, () => {});
 
         expect(picked).toEqual([["a", "b", "c", "d"], ["a", "b"]]);
         expect(value.includedKeys).toEqual([`commit:${"a".repeat(40)}`, `commit:${"b".repeat(40)}`]);
@@ -168,7 +168,7 @@ describe("createPromotionPullRequest", () => {
                 : { cherryPickId: 2, status: "completed" };
         });
 
-        const value = await createPromotionPullRequest(fakeClient({ createCherryPick }), repository, mergePlan, new Set(["pr:1", "pr:2"]), "title", () => {});
+        const value = await createPromotionPullRequest(fakeClient({ createCherryPick }), repository, mergePlan, new Set(["pr:1", "pr:2"]), { title: "title" }, () => {});
 
         expect(mergePlan.items.map(i => i.key)).toEqual(["pr:1", "pr:2"]);
         expect(picked).toEqual([["x", "f1"], ["x"]]);
@@ -196,7 +196,7 @@ describe("createPromotionPullRequest", () => {
         const deleteBranch = vi.fn(async () => {});
         const createPullRequest = vi.fn(async (_repo: unknown, request: { sourceBranch: string }) => ({ pullRequestId: 99, sourceBranch: request.sourceBranch }));
 
-        const value = await createPromotionPullRequest(fakeClient({ createCherryPick, deleteBranch, createPullRequest }), repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), "title", () => {});
+        const value = await createPromotionPullRequest(fakeClient({ createCherryPick, deleteBranch, createPullRequest }), repository, bigPlan, new Set(bigPlan.items.map(i => i.key)), { title: "title" }, () => {});
 
         const finalBranch = (value.pullRequest as unknown as { sourceBranch: string }).sourceBranch;
         expect(createCherryPick.mock.calls.length).toBeGreaterThan(2);

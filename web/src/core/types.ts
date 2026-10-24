@@ -118,6 +118,14 @@ export interface PlanItem {
     promotedIn?: number;
     /** An active pull request into the source branch; it has no commits on the source yet. */
     openPullRequest?: boolean;
+    /** Earlier items with commits to promote that changed files this item's commits build on. */
+    dependsOn?: ItemDependency[];
+}
+
+export interface ItemDependency {
+    key: string;
+    /** The shared files. */
+    paths: string[];
 }
 
 export interface PromotionResult {
