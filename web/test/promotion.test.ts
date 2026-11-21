@@ -98,6 +98,29 @@ describe("buildPlan", () => {
         expect(plan.items.map(i => i.commits[0].promotedReason)).toEqual(["in !2 into main", "in !3 into main"]);
     });
 
+    it("doesn't file a commit pushed straight to the source under a rebase or a pull request from the source", () => {
+        // a was pushed to develop directly; a rebase PR into a test branch and a PR from develop into a release both hold it.
+        const rebase = { ...pr(9, "release/test"), sourceRefName: "refs/heads/cherry-pick/release/test/sync/20260101-000000" };
+        const fromSource = { ...pr(8, "release/other"), sourceRefName: "refs/heads/develop" };
+        const plan = buildPlan("develop", "main", [commit("a", [])], [], matches({}, { a: [rebase, fromSource] }));
+
+        expect(plan.items.map(i => i.key)).toEqual([`commit:${"a".padEnd(40, "0")}`]);
+    });
+
+    it("doesn't count a completed pull request whose merge is no longer on the target", () => {
+        // PR 2 and promotion PR 5 both completed into main, but main was reset since: only PR 3's merge is still there.
+        const merged = (id: number, mergeCommit: string): GitPullRequest => ({ ...pr(id, "main"), lastMergeCommit: { commitId: mergeCommit.padEnd(40, "0") } });
+        const source = [commit("c", ["b"]), commit("b", ["a"]), commit("a", [])];
+        const stillThere = commit("m3", ["t"]);
+        const promotion = { pullRequest: merged(5, "m5"), commits: [{ ...source[0], commitId: "p".padEnd(40, "0"), parents: [] }] };
+        const plan = buildPlan("develop", "main", source, [stillThere], matches({}, { a: [merged(2, "m2")], b: [merged(3, "m3")] }), [promotion]);
+
+        const reason = (name: string) => plan.items.flatMap(i => i.commits).find(c => c.commit.commitId === name.padEnd(40, "0"))!.promotedReason;
+        expect(reason("a")).toBeUndefined();
+        expect(reason("b")).toBe("in !3 into main");
+        expect(reason("c")).toBeUndefined();
+    });
+
     it("treats the commits under a merge commit already on the target as promoted", () => {
         // PR 7 merged f into develop with merge commit m; m alone was cherry-picked to main
         const merge = commit("m", ["base", "f"], "Merged PR 7: change");

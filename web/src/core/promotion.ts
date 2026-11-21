@@ -414,14 +414,20 @@ export function buildPlan(
     const target = shortBranchName(targetBranch);
     const openPromotions = new Map<string, number>();
 
+    // A completed pull request counts only while its merge is still on the target: resetting or force-pushing the
+    // target drops it, and the pull request still says completed.
+    const onTarget = new Set(targetOnly.map(c => c.commitId));
+    const stillMerged = (pr: GitPullRequest) => !pr.lastMergeCommit || onTarget.has(pr.lastMergeCommit.commitId);
+
     // Completed promotions go last so they win over open ones holding the same change.
     const promotedBy = new Map<string, GitPullRequest>();
-    for (const promotion of [...promotions].sort((a, b) => Number(a.pullRequest.status === "completed") - Number(b.pullRequest.status === "completed"))) {
+    const counted = promotions.filter(p => p.pullRequest.status !== "completed" || stillMerged(p.pullRequest));
+    for (const promotion of counted.sort((a, b) => Number(a.pullRequest.status === "completed") - Number(b.pullRequest.status === "completed"))) {
         for (const commit of promotion.commits) promotedBy.set(equivalenceKey(commit), promotion.pullRequest);
     }
 
     const promotedReason = (commit: GitCommitRef): string | undefined => {
-        const intoTarget = [...completed(matches.byMergeCommit.get(commit.commitId)), ...completed(matches.byCommit.get(commit.commitId))].find(pr => pr.targetRefName === targetRef);
+        const intoTarget = [...completed(matches.byMergeCommit.get(commit.commitId)), ...completed(matches.byCommit.get(commit.commitId))].find(pr => pr.targetRefName === targetRef && stillMerged(pr));
         if (intoTarget) return `in !${intoTarget.pullRequestId} into ${target}`;
         const equivalent = equivalents.get(equivalenceKey(commit));
         if (equivalent) return `same author, date and message as ${equivalent.substring(0, 8)} on ${target}`;
@@ -943,6 +949,9 @@ export function firstLine(text: string): string {
     return (index < 0 ? text : text.substring(0, index)).trim();
 }
 
+/** Where every branch this tool creates lives, whatever the target. */
+const generatedRefPrefix = "refs/heads/cherry-pick/";
+
 function generatedBranchPrefix(targetBranch: string): string {
     return `cherry-pick/${shortBranchName(targetBranch)}/`;
 }
@@ -955,11 +964,15 @@ function syncBranchPrefix(targetBranch: string): string {
  * Prefers the pull request that brought the commit into the source branch, then any completed one other
  * than a pull request into the target. Merge commit matches beat plain commit matches, and the earliest
  * completion wins within a tier.
+ *
+ * Pull requests that can't have brought the commit into the source are left out: this tool's own (a rebase pull
+ * request holds the source's history, a promotion holds copies), and ones from the source branch itself. Without
+ * them, a commit pushed straight to the source shows as itself rather than under some later pull request.
  */
 function choosePullRequest(commitId: string, sourceRef: string, targetRef: string, matches: PullRequestMatches): GitPullRequest | undefined {
-    const notIntoTarget = (pr: GitPullRequest) => pr.targetRefName !== targetRef;
-    const merged = completed(matches.byMergeCommit.get(commitId)).filter(notIntoTarget);
-    const containing = completed(matches.byCommit.get(commitId)).filter(notIntoTarget);
+    const carriedIt = (pr: GitPullRequest) => pr.targetRefName !== targetRef && pr.sourceRefName !== sourceRef && !pr.sourceRefName.startsWith(generatedRefPrefix);
+    const merged = completed(matches.byMergeCommit.get(commitId)).filter(carriedIt);
+    const containing = completed(matches.byCommit.get(commitId)).filter(carriedIt);
     const intoSource = (pr: GitPullRequest) => pr.targetRefName === sourceRef;
     const tiers = [merged.filter(intoSource), containing.filter(intoSource), merged, containing];
     for (const tier of tiers) {
