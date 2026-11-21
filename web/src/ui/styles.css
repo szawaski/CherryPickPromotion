@@ -335,16 +335,43 @@ html, body {
     gap: 6px;
 }
 
-.cpp-conflict-diff {
-    flex: 2;
-    min-height: 120px;
+.cpp-conflict-result {
+    flex: 1;
+    min-height: 240px;
     border: 1px solid var(--cpp-border);
 }
 
-.cpp-conflict-result {
-    flex: 3;
-    min-height: 160px;
-    border: 1px solid var(--cpp-border);
+/* Which conflict this is takes its own line, so the buttons stay together on the next. */
+.cpp-conflict-status {
+    flex-basis: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The date after each conflict line, and the suggestion after each block's <<<<<<< line. */
+.cpp-line-date {
+    color: var(--cpp-muted) !important;
+    font-style: italic;
+    opacity: 0.8;
+}
+
+.cpp-line-date-newer {
+    color: var(--cpp-success) !important;
+    font-weight: 600;
+    opacity: 1;
+}
+
+.cpp-line-suggestion {
+    color: var(--cpp-accent) !important;
+    font-weight: 600;
+}
+
+/* The Take button the dates suggest. */
+.cpp .cpp-suggested {
+    border: 2px solid var(--cpp-accent);
+    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
+    color: var(--cpp-accent);
+    font-weight: 600;
 }
 
 .cpp-conflict-whole {

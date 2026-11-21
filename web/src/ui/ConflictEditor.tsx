@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { findConflictBlocks, strayConflictMarkers, unresolvedInText, type ConflictBlock, type ConflictFile, type FileResolution } from "../core/conflicts";
+import { combineBoth, suggestFromDates, suggestFromText, type BlockSuggestion, type LineOrigin } from "../core/lineOrigins";
 import { firstLine, type ConflictAnswer, type ConflictRequest } from "../core/promotion";
 import * as monaco from "./monaco";
 
@@ -19,6 +20,29 @@ interface Props {
 
 type Block = ConflictBlock;
 
+/** One conflict line, followed through edits by a model decoration, and when it was written once that's known. */
+interface LineMark {
+    id: string;
+    side: "current" | "incoming";
+    block: number;
+    /** Its place among its side's lines in the block. */
+    index: number;
+    /** The line's length when the conflict opened; a line that had text and now has none was deleted. */
+    length: number;
+    origin?: LineOrigin;
+}
+
+/** A text conflict's line dates: loading, shown, or not available. markers follow each block's <<<<<<< line. */
+interface FileDates {
+    state: "loading" | "ready" | "unavailable";
+    markers: string[];
+    lines: LineMark[];
+    /** Per block: what the text says from the start, then the dates once they're in. */
+    suggestions: (BlockSuggestion | undefined)[];
+    /** Per block: the lines both sides started from, for combining them. */
+    bases: string[][];
+}
+
 export default function ConflictEditor({ request, onDone }: Props) {
     const { files, labels, commit, item } = request;
     const [fileIndex, setFileIndex] = useState(0);
@@ -33,6 +57,54 @@ export default function ConflictEditor({ request, onDone }: Props) {
         }
         return map;
     }, [files]);
+    // Every conflict line of each text conflict, tracked from the start so its date lands on it after edits.
+    const dates = useMemo(() => {
+        const map = new Map<string, FileDates>();
+        for (const file of files) {
+            const model = models.get(file.path);
+            const blocks = model && file.regions ? findConflictBlocks(file.merged!) : [];
+            if (!model || blocks.length === 0 || blocks.length !== file.regions!.length) continue;
+            const track = (line: number) =>
+                model.deltaDecorations([], [{ range: new monaco.Range(line, 1, line, model.getLineMaxColumn(line)), options: { stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges } }])[0];
+            const lines: LineMark[] = [];
+            blocks.forEach((b, block) => {
+                for (let line = b.start + 1; line < b.middle; line++) lines.push({ id: track(line), side: "current", block, index: line - b.start - 1, length: model.getLineLength(line) });
+                for (let line = b.middle + 1; line < b.end; line++) lines.push({ id: track(line), side: "incoming", block, index: line - b.middle - 1, length: model.getLineLength(line) });
+            });
+            const sideLines = (text: string, at: { start: number; length: number }) => text.split("\n").map(l => l.replace(/\r$/, "")).slice(at.start, at.start + at.length);
+            const suggestions = file.regions!.map(r => suggestFromText(r.base, sideLines(file.current!, r.current), sideLines(file.incoming!, r.incoming)));
+            map.set(file.path, { state: request.origins ? "loading" : "unavailable", markers: blocks.map(b => track(b.start)), lines, suggestions, bases: file.regions!.map(r => r.base) });
+        }
+        return map;
+    }, [files, models]);
+    useEffect(() => {
+        let live = true;
+        for (const file of files) {
+            const fileDates = dates.get(file.path);
+            if (!fileDates || !request.origins) continue;
+            const done = () => live && setVersion(v => v + 1);
+            request.origins(file).then(
+                origins => {
+                    if (!origins) {
+                        fileDates.state = "unavailable";
+                    } else {
+                        for (const mark of fileDates.lines) mark.origin = origins.regions[mark.block]?.[mark.side][mark.index];
+                        // What the text says stands; the dates only speak where it couldn't.
+                        fileDates.suggestions = origins.regions.map((r, i) => fileDates.suggestions[i] ?? suggestFromDates(r.current, r.incoming));
+                        fileDates.state = "ready";
+                    }
+                    done();
+                },
+                () => {
+                    fileDates.state = "unavailable";
+                    done();
+                }
+            );
+        }
+        return () => {
+            live = false;
+        };
+    }, [dates]);
     useEffect(() => {
         const subscriptions = [...models.values()].map(m => m.onDidChangeContent(() => setVersion(v => v + 1)));
         return () => {
@@ -77,7 +149,7 @@ export default function ConflictEditor({ request, onDone }: Props) {
 
                 <div className="cpp-conflict-main">
                     {!file && <p>Azure DevOps reported a conflict, but every file in this commit merged cleanly here. Commit to continue.</p>}
-                    {file?.kind === "content" && <TextConflict key={file.path} file={file} model={models.get(file.path)!} labels={labels} />}
+                    {file?.kind === "content" && <TextConflict key={file.path} file={file} model={models.get(file.path)!} labels={labels} dates={dates.get(file.path)} datesState={dates.get(file.path)?.state} />}
                     {file && file.kind !== "content" && (
                         <WholeFileConflict key={file.path} file={file} labels={labels} choice={choices.get(file.path)} onChoose={c => setChoices(new Map(choices).set(file.path, c))} />
                     )}
@@ -108,46 +180,40 @@ export default function ConflictEditor({ request, onDone }: Props) {
     );
 }
 
-function TextConflict({ file, model, labels }: { file: ConflictFile; model: monaco.editor.ITextModel; labels: ConflictRequest["labels"] }) {
-    const diffHost = useRef<HTMLDivElement>(null);
+function TextConflict({ file, model, labels, dates, datesState }: { file: ConflictFile; model: monaco.editor.ITextModel; labels: ConflictRequest["labels"]; dates?: FileDates; datesState?: FileDates["state"] }) {
     const resultHost = useRef<HTMLDivElement>(null);
     const resultEditor = useRef<monaco.editor.IStandaloneCodeEditor>();
+    const paint = useRef<() => void>();
     const [blockIndex, setBlockIndex] = useState(0);
     const [blocks, setBlocks] = useState<Block[]>(() => findBlocks(model));
     const [stray, setStray] = useState<number[]>(() => strayConflictMarkers(model.getValue()));
 
     useEffect(() => {
-        const theme = isDark() ? "vs-dark" : "vs";
-        const language = model.getLanguageId();
-        const original = monaco.editor.createModel(file.current ?? "", language);
-        const modified = monaco.editor.createModel(file.incoming ?? "", language);
-        const diff = monaco.editor.createDiffEditor(diffHost.current!, { readOnly: true, automaticLayout: true, theme, renderSideBySide: true, originalEditable: false });
-        diff.setModel({ original, modified });
-
-        const editor = monaco.editor.create(resultHost.current!, { model, automaticLayout: true, theme, minimap: { enabled: false } });
+        const editor = monaco.editor.create(resultHost.current!, { model, automaticLayout: true, theme: isDark() ? "vs-dark" : "vs", minimap: { enabled: false } });
         resultEditor.current = editor;
-        let decorations = editor.createDecorationsCollection();
-        const refresh = () => {
+        const decorations = editor.createDecorationsCollection();
+        paint.current = () => {
             const found = findBlocks(model);
             setBlocks(found);
             setStray(strayConflictMarkers(model.getValue()));
-            decorations.set(found.flatMap(blockDecorations));
+            decorations.set([...found.flatMap(blockDecorations), ...dateDecorations(model, found, dates)]);
         };
-        refresh();
-        const subscription = model.onDidChangeContent(refresh);
+        paint.current();
+        const subscription = model.onDidChangeContent(() => paint.current?.());
         reveal(editor, findBlocks(model)[0]);
 
         return () => {
             subscription.dispose();
             decorations.clear();
             editor.dispose();
-            diff.dispose();
-            original.dispose();
-            modified.dispose();
+            paint.current = undefined;
         };
     }, [file, model]);
+    // The dates arrive after the editor opens.
+    useEffect(() => paint.current?.(), [datesState]);
 
     const current = blocks[Math.min(blockIndex, blocks.length - 1)];
+    const suggestion = current ? suggestionFor(model, dates, current) : undefined;
     const go = (index: number) => {
         const next = (index + blocks.length) % blocks.length;
         setBlockIndex(next);
@@ -158,7 +224,9 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
         const lines = model.getLinesContent();
         const currentLines = lines.slice(current.start, current.middle - 1);
         const incomingLines = lines.slice(current.middle, current.end - 1);
-        const kept = side === "current" ? currentLines : side === "incoming" ? incomingLines : [...currentLines, ...incomingLines];
+        // Both: the base lines the two sides share only once, when it's known what they started from.
+        const base = baseFor(model, dates, current);
+        const kept = side === "current" ? currentLines : side === "incoming" ? incomingLines : base ? combineBoth(base, currentLines, incomingLines) : [...currentLines, ...incomingLines];
         const eol = model.getEOL();
         const lastLine = current.end === model.getLineCount();
         const range = lastLine
@@ -168,6 +236,20 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
         model.pushEditOperations([], [{ range, text }], () => null);
         // The next block moves into this one's place.
         setTimeout(() => reveal(resultEditor.current!, findBlocks(model)[Math.min(blockIndex, Math.max(0, findBlocks(model).length - 1))]));
+    };
+    const takeButton = (side: "current" | "incoming" | "both", label: string) => {
+        const suggested = suggestion?.side === side;
+        return (
+            <button
+                disabled={!current}
+                className={suggested ? "cpp-suggested" : undefined}
+                title={suggested ? `Suggested: ${suggestionText(suggestion!)}` : undefined}
+                onClick={() => take(side)}
+            >
+                {label}
+                {suggested && " (Suggested)"}
+            </button>
+        );
     };
     const original = file.merged!;
     const changed = model.getValue() !== original;
@@ -180,13 +262,8 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
 
     return (
         <div className="cpp-conflict-text">
-            <div className="cpp-conflict-labels">
-                <span>Current: {labels.current}</span>
-                <span>Incoming: {labels.incoming}</span>
-            </div>
-            <div className="cpp-conflict-diff" ref={diffHost} />
             <div className="cpp-conflict-toolbar">
-                <span className="cpp-meta">
+                <span className="cpp-meta cpp-conflict-status">
                     {blocks.length > 0
                         ? `Conflict ${Math.min(blockIndex, blocks.length - 1) + 1} of ${blocks.length} in ${file.path}`
                         : stray.length > 0
@@ -198,19 +275,91 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
                 )}
                 <button disabled={blocks.length < 2} onClick={() => go(blockIndex - 1)}>Prev</button>
                 <button disabled={blocks.length < 2} onClick={() => go(blockIndex + 1)}>Next</button>
-                <button disabled={!current} onClick={() => take("current")}>Take current</button>
-                <button disabled={!current} onClick={() => take("incoming")}>Take incoming</button>
-                <button disabled={!current} onClick={() => take("both")}>Take both</button>
+                {takeButton("current", "Take current")}
+                {takeButton("incoming", "Take incoming")}
+                {takeButton("both", "Take both")}
                 <button disabled={!changed} onClick={reset} title="Put back every conflict in this file and undo all edits to it">
                     Reset file
                 </button>
             </div>
             <div className="cpp-conflict-labels">
-                <span>Result (editable)</span>
+                <span>
+                    Current = {labels.current} · Incoming = {labels.incoming}
+                </span>
+                <span>
+                    {current && suggestion && `Suggested: ${suggestionText(suggestion)}`}
+                    {current && !suggestion && datesState === "loading" && "Dating lines…"}
+                    {current && !suggestion && datesState === "ready" && "No suggestion for this conflict: each side replaced lines, and the dates can't tell them apart."}
+                    {current && !suggestion && datesState === "unavailable" && "No suggestion: each side replaced lines, and line dates aren't available for this file."}
+                </span>
             </div>
             <div className="cpp-conflict-result" ref={resultHost} />
         </div>
     );
+}
+
+/** Which of the file's original blocks a block still in it is, found by the <<<<<<< line it started with. */
+function blockIndex(model: monaco.editor.ITextModel, dates: FileDates | undefined, block: Block): number {
+    return dates ? dates.markers.findIndex(id => model.getDecorationRange(id)?.startLineNumber === block.start) : -1;
+}
+
+function suggestionFor(model: monaco.editor.ITextModel, dates: FileDates | undefined, block: Block): BlockSuggestion | undefined {
+    const index = blockIndex(model, dates, block);
+    return index < 0 ? undefined : dates!.suggestions[index];
+}
+
+function baseFor(model: monaco.editor.ITextModel, dates: FileDates | undefined, block: Block): string[] | undefined {
+    const index = blockIndex(model, dates, block);
+    return index < 0 ? undefined : dates!.bases[index];
+}
+
+function suggestionText(s: BlockSuggestion): string {
+    if (s.why === "onlyAdded") return "both, each side only added lines here and neither replaced the other's";
+    if (s.why === "contains") return `${s.side}, it already has every ${s.side === "current" ? "incoming" : "current"} line`;
+    const newer = (s.side === "current" ? s.current : s.incoming)!;
+    const older = (s.side === "current" ? s.incoming : s.current)!;
+    // On the same day the dates alone read as a tie, so the times show.
+    const sameDay = dateLabel(newer) === dateLabel(older);
+    return `${s.side}, its newest line is ${dateLabel(newer, sameDay)} vs ${s.side === "current" ? "incoming" : "current"}'s ${dateLabel(older, sameDay)}`;
+}
+
+function dateLabel(origin: LineOrigin, withTime = false): string {
+    const at = new Date(origin.date);
+    const date = at.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const label = withTime ? `${date} ${at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : date;
+    return origin.orAtLeast ? `${label} or earlier` : label;
+}
+
+/** Each conflict line still in a block gets its date after it; each block's first line, the suggestion. */
+function dateDecorations(model: monaco.editor.ITextModel, blocks: Block[], dates: FileDates | undefined): monaco.editor.IModelDeltaDecoration[] {
+    if (!dates) return [];
+    const decorations: monaco.editor.IModelDeltaDecoration[] = [];
+    const endOf = (line: number) => new monaco.Range(line, model.getLineMaxColumn(line), line, model.getLineMaxColumn(line));
+    const inBlock = (line: number) => blocks.some(b => b.start < line && line < b.end && line !== b.middle);
+    const newest = dates.suggestions.map(s => (s?.side === "current" ? s.current : s?.side === "incoming" ? s.incoming : undefined));
+    for (const mark of dates.state === "ready" ? dates.lines : []) {
+        const range = model.getDecorationRange(mark.id);
+        if (!mark.origin || !range || (range.isEmpty() && mark.length > 0) || !inBlock(range.startLineNumber)) continue;
+        const isNewest = newest[mark.block] !== undefined && dates.suggestions[mark.block]?.side === mark.side && newest[mark.block]!.commitId === mark.origin.commitId;
+        const line = range.startLineNumber;
+        // Text after the line: an empty range at its end, which Monaco only draws with showIfCollapsed.
+        decorations.push({
+            range: endOf(line),
+            options: { showIfCollapsed: true, after: { content: `   ${dateLabel(mark.origin)}`, inlineClassName: isNewest ? "cpp-line-date cpp-line-date-newer" : "cpp-line-date" } }
+        });
+        // The details show when hovering anywhere on the line.
+        decorations.push({
+            range: new monaco.Range(line, 1, line, model.getLineMaxColumn(line)),
+            options: { hoverMessage: { value: `**${dateLabel(mark.origin, true)}** · ${mark.origin.author} · \`${mark.origin.commitId.substring(0, 8)}\`\n\n${mark.origin.message}` } }
+        });
+    }
+    dates.markers.forEach((id, i) => {
+        const line = model.getDecorationRange(id)?.startLineNumber;
+        const suggestion = dates.suggestions[i];
+        if (!line || !suggestion || !blocks.some(b => b.start === line)) return;
+        decorations.push({ range: endOf(line), options: { showIfCollapsed: true, after: { content: `   Suggested: ${suggestionText(suggestion)}`, inlineClassName: "cpp-line-suggestion" } } });
+    });
+    return decorations;
 }
 
 function WholeFileConflict({ file, labels, choice, onChoose }: { file: ConflictFile; labels: ConflictRequest["labels"]; choice?: "incoming" | "current"; onChoose(choice: "incoming" | "current"): void }) {

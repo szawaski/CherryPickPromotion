@@ -1,4 +1,5 @@
 import { AdoClient, fullBranchName, shortBranchName } from "./adoClient";
+import { conflictLineOrigins, type FileOrigins } from "./lineOrigins";
 import { buildPushChanges, prepareMerge, type ConflictFile, type ConflictLabels, type FileResolution } from "./conflicts";
 import type {
     GitChange,
@@ -25,6 +26,8 @@ export interface ConflictRequest {
     /** Files the commit changes that merged on their own. */
     autoMerged: string[];
     labels: ConflictLabels;
+    /** Dates each conflict line of a text conflict on both sides, to suggest the newer one; undefined when it can't. */
+    origins?: (file: ConflictFile) => Promise<FileOrigins | undefined>;
 }
 
 /**
@@ -865,7 +868,14 @@ async function resolveInteractively(
     const prepared = await prepareMerge(client, repository.id, { ...full, parents: full.parents ?? commit.commit.parents }, head, labels);
 
     progress(`Waiting for the conflicts in commit ${commitLabel(full)} to be resolved…`);
-    const answer = await resolveConflict({ commit: full, item, files: prepared.conflicts, autoMerged: prepared.merged.map(m => m.path), labels });
+    const answer = await resolveConflict({
+        commit: full,
+        item,
+        files: prepared.conflicts,
+        autoMerged: prepared.merged.map(m => m.path),
+        labels,
+        origins: file => conflictLineOrigins(client, repository.id, file)
+    });
     if (answer === "abort") throw new PromotionAborted();
     if (answer === "skip") return undefined;
 

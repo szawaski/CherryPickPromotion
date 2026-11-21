@@ -11,6 +11,20 @@ export type ConflictKind = "content" | "deletedOnTarget" | "deletedInSource" | "
 /** Where a file's new content comes from: merged text, or a copy of a file at a commit. undefined means delete it. */
 type Write = { text: string } | { copy: { commitId: string; path: string } } | undefined;
 
+/** Where one conflict block's lines come from: 0-based line ranges in the current and incoming versions. */
+export interface ConflictRegion {
+    current: { start: number; length: number };
+    incoming: { start: number; length: number };
+    /** The lines both sides started from, before either changed them. */
+    base: string[];
+}
+
+/** A version of a file: the path it has at a commit. */
+export interface FileAt {
+    commitId: string;
+    path: string;
+}
+
 export interface ConflictFile {
     path: string;
     kind: ConflictKind;
@@ -20,6 +34,11 @@ export interface ConflictFile {
     current?: string;
     /** For content conflicts: the merge, with conflict markers around each overlapping change. */
     merged?: string;
+    /** For content conflicts: each block's lines in the two versions, in the order the blocks appear in merged. */
+    regions?: ConflictRegion[];
+    /** For content conflicts: the versions the current and incoming text are, to date their lines. */
+    currentAt?: FileAt;
+    incomingAt?: FileAt;
     /** What "keep incoming" and "keep current" write; "unchanged" leaves the target's file alone. */
     keepIncoming: Write;
     keepCurrent: Write | "unchanged";
@@ -46,7 +65,7 @@ export const conflictMiddle = "=======";
 export const conflictEnd = ">>>>>>>";
 
 /** A three-way merge of text. Overlapping changes are wrapped in conflict markers. */
-export function mergeText(base: string, current: string, incoming: string, labels: ConflictLabels): { text: string; conflicts: number } {
+export function mergeText(base: string, current: string, incoming: string, labels: ConflictLabels): { text: string; conflicts: number; regions: ConflictRegion[] } {
     const eol = (current + incoming).includes("\r\n") ? "\r\n" : "\n";
     const block = (lines: string[]) => {
         const text = lines.join("");
@@ -55,15 +74,21 @@ export function mergeText(base: string, current: string, incoming: string, label
 
     let text = "";
     let conflicts = 0;
+    const regions: ConflictRegion[] = [];
     for (const region of diff3Merge(splitLines(current), splitLines(base), splitLines(incoming), { excludeFalseConflicts: true })) {
         if (region.ok) {
             text += region.ok.join("");
         } else if (region.conflict) {
             conflicts++;
+            regions.push({
+                current: { start: region.conflict.aIndex, length: region.conflict.a.length },
+                incoming: { start: region.conflict.bIndex, length: region.conflict.b.length },
+                base: region.conflict.o.map(line => line.replace(/\r?\n$/, ""))
+            });
             text += `${conflictStart} ${labels.current}${eol}${block(region.conflict.a)}${conflictMiddle}${eol}${block(region.conflict.b)}${conflictEnd} ${labels.incoming}${eol}`;
         }
     }
-    return { text, conflicts };
+    return { text, conflicts, regions };
 }
 
 /** Lines with their line endings, so joining them gives back the exact text. */
@@ -187,7 +212,14 @@ function mergeFile(
 
     const merge = mergeText(base?.content ?? "", current.content!, incoming.content!, labels);
     if (merge.conflicts === 0) return write({ text: merge.text });
-    conflict("content", { incoming: incoming.content, current: current.content, merged: merge.text });
+    conflict("content", {
+        incoming: incoming.content,
+        current: current.content,
+        merged: merge.text,
+        regions: merge.regions,
+        currentAt: currentSource,
+        incomingAt: { commitId: incomingCommitId, path }
+    });
 }
 
 /** The push changes for a prepared merge and the user's resolutions of its conflicts. */

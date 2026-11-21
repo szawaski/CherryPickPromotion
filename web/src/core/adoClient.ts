@@ -249,6 +249,20 @@ export class AdoClient {
         });
     }
 
+    /** The commits that changed a file, newest first, in the history of a commit, like git log -- path. */
+    async getFileHistory(repositoryId: string, path: string, commitId: string, top: number): Promise<GitCommitRef[]> {
+        const result = await this.send<{ value: GitCommitRef[] }>(
+            "GET",
+            this.gitUrl(`repositories/${repositoryId}/commits`, {
+                "searchCriteria.itemPath": path,
+                "searchCriteria.itemVersion.version": commitId,
+                "searchCriteria.itemVersion.versionType": "commit",
+                "searchCriteria.$top": top
+            })
+        );
+        return result.value;
+    }
+
     async getMergeBase(repositoryId: string, commitId: string, otherCommitId: string): Promise<string> {
         const result = await this.send<{ value: { commitId: string }[] }>(
             "GET",

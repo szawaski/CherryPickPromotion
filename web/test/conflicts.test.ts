@@ -8,7 +8,7 @@ const labels = { current: "main", incoming: "abc12345 (develop)" };
 describe("mergeText", () => {
     it("merges changes to different lines", () => {
         const result = mergeText("a\nb\nc\n", "A\nb\nc\n", "a\nb\nC\n", labels);
-        expect(result).toEqual({ text: "A\nb\nC\n", conflicts: 0 });
+        expect(result).toEqual({ text: "A\nb\nC\n", conflicts: 0, regions: [] });
     });
 
     it("marks changes to the same lines", () => {
@@ -16,6 +16,8 @@ describe("mergeText", () => {
         expect(result.conflicts).toBe(1);
         expect(result.text).toBe("a\n<<<<<<< main\nB1\n=======\nB2\n>>>>>>> abc12345 (develop)\nc\n");
         expect(countConflicts(result.text)).toBe(1);
+        // Line 1 (0-based) of each side, one line long.
+        expect(result.regions).toEqual([{ current: { start: 1, length: 1 }, incoming: { start: 1, length: 1 }, base: ["b"] }]);
     });
 
     it("keeps Windows line endings and a missing final newline", () => {
@@ -24,7 +26,7 @@ describe("mergeText", () => {
     });
 
     it("doesn't count the same change on both sides as a conflict", () => {
-        expect(mergeText("a\n", "b\n", "b\n", labels)).toEqual({ text: "b\n", conflicts: 0 });
+        expect(mergeText("a\n", "b\n", "b\n", labels)).toEqual({ text: "b\n", conflicts: 0, regions: [] });
     });
 });
 
