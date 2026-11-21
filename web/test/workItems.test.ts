@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdoClient } from "../src/core/adoClient";
 import type { PlanItem, WorkItem } from "../src/core/types";
-import { groupByWorkItem, groupItems, loadWorkItems, workItemMatches, type WorkItemGroup } from "../src/core/workItems";
+import { groupByWorkItem, groupItems, itemDate, loadWorkItems, workItemMatches, type WorkItemGroup } from "../src/core/workItems";
 
 const item = (key: string, workItemIds: number[]): PlanItem => ({ key, commits: [], workItemIds, hasPendingCommits: true });
 const workItem = (id: number, parentId?: number): WorkItem => ({ id, title: `WI ${id}`, type: "Task", state: "Active", parentId });
@@ -27,6 +27,22 @@ describe("groupByWorkItem", () => {
             [20, ["pr:3"]],
             [1, [], [[10, ["pr:1"], [[101, ["pr:2"]], [100, ["pr:3"]]]]]],
             ["none", ["commit:x"]]
+        ]);
+    });
+
+    it("puts the newest groups first by their earliest item, at every level", () => {
+        const dated = (key: string, workItemIds: number[], date: string): PlanItem => ({
+            ...item(key, workItemIds),
+            commits: [{ commit: { commitId: key, comment: key, author: { name: "Dev", email: "dev@example.com", date } }, order: 0, isMerge: false }]
+        });
+        // Story 10 (under epic 1) started Sep 1; story 30 Oct 1; task 11 Nov 1 and task 12 Sep 15, both under story 10.
+        const workItems = new Map([[1, workItem(1)], [10, workItem(10, 1)], [11, workItem(11, 10)], [12, workItem(12, 10)], [30, workItem(30)], [40, workItem(40)]]);
+        const items = [dated("a", [10], "2026-09-01T00:00:00Z"), dated("b", [30], "2026-10-01T00:00:00Z"), dated("c", [11], "2026-11-01T00:00:00Z"), dated("d", [12], "2026-09-15T00:00:00Z"), dated("e", [40], "2026-10-01T00:00:00Z")];
+
+        expect(shape(groupByWorkItem(items, workItems))).toEqual([
+            [40, ["e"]],
+            [30, ["b"]],
+            [1, [], [[10, ["a"], [[11, ["c"]], [12, ["d"]]]]]]
         ]);
     });
 
@@ -75,5 +91,13 @@ describe("loadWorkItems", () => {
         expect(getWorkItems.mock.calls).toEqual([[[100, 404]], [[10]], [[1]]]);
         expect([...result.keys()].sort((a, b) => a - b)).toEqual([1, 10, 100, 404]);
         expect(result.get(404)).toBeUndefined();
+    });
+});
+
+describe("itemDate", () => {
+    it("goes by when the item went into the branch, so the dates follow the list", () => {
+        const open = { pullRequestId: 1, title: "PR", status: "active" as const, sourceRefName: "refs/heads/f", targetRefName: "refs/heads/develop", creationDate: "2026-11-01T00:00:00Z", createdBy: { displayName: "Dev" } };
+        expect(itemDate({ ...item("pr:1", []), pullRequest: open })).toBe("2026-11-01T00:00:00Z");
+        expect(itemDate({ ...item("commit:c", []), landedAt: "2026-10-05T00:00:00Z" })).toBe("2026-10-05T00:00:00Z");
     });
 });

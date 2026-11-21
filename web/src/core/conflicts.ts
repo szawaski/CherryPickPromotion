@@ -76,6 +76,52 @@ export function countConflicts(text: string): number {
     return text.match(new RegExp(`^${conflictStart}`, "gm"))?.length ?? 0;
 }
 
+/** A conflict block as the 1-based line numbers of its <<<<<<<, ======= and >>>>>>> lines. */
+export interface ConflictBlock {
+    start: number;
+    middle: number;
+    end: number;
+}
+
+/** The complete conflict blocks in a merged file. */
+export function findConflictBlocks(text: string): ConflictBlock[] {
+    const blocks: ConflictBlock[] = [];
+    let start = 0;
+    let middle = 0;
+    text.split("\n").forEach((raw, i) => {
+        const line = raw.replace(/\r$/, "");
+        const number = i + 1;
+        if (line.startsWith(conflictStart)) {
+            start = number;
+            middle = 0;
+        } else if (start && !middle && line === conflictMiddle) {
+            middle = number;
+        } else if (start && middle && line.startsWith(conflictEnd)) {
+            blocks.push({ start, middle, end: number });
+            start = 0;
+        }
+    });
+    return blocks;
+}
+
+/**
+ * Lines left from a conflict outside any complete block: a <<<<<<< or >>>>>>> whose partner lines were deleted. They
+ * would be committed into the file, so they count as unresolved. A lone ======= is left alone, as files use it.
+ */
+export function strayConflictMarkers(text: string): number[] {
+    const inBlock = new Set(findConflictBlocks(text).flatMap(b => [b.start, b.end]));
+    const stray: number[] = [];
+    text.split("\n").forEach((line, i) => {
+        if ((line.startsWith(conflictStart) || line.startsWith(conflictEnd)) && !inBlock.has(i + 1)) stray.push(i + 1);
+    });
+    return stray;
+}
+
+/** What's left to resolve in a merged file: its complete conflict blocks plus any stray marker lines. */
+export function unresolvedInText(text: string): number {
+    return findConflictBlocks(text).length + strayConflictMarkers(text).length;
+}
+
 /**
  * Merges one commit onto a branch head the way a cherry-pick would, file by file: against the commit's first parent,
  * its own version, and the head's version.

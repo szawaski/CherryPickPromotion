@@ -29,7 +29,7 @@ export async function loadWorkItems(client: AdoClient, ids: Iterable<number>, kn
 }
 
 /**
- * Builds the work item tree for the items, keeping their order within each work item. An item linked to several work
+ * Builds the work item tree for the items, keeping their order within each work item and putting the newest groups first. An item linked to several work
  * items shows up under each one. Parents with no items of their own are included so related work stays together.
  * Items with no work item go in a last group with no id.
  */
@@ -55,12 +55,31 @@ export function groupByWorkItem(items: PlanItem[], workItems: WorkItemMap): Work
         for (const id of item.workItemIds) node(id).items.push(item);
     }
 
+    // Newest first by the date each group shows, its earliest item's; the higher id first on the same day.
+    const since = new Map<WorkItemGroup, number>();
+    const earliest = (group: WorkItemGroup): number => {
+        let value = since.get(group);
+        if (value === undefined) {
+            const dates = [...group.items.map(i => Date.parse(itemDate(i) ?? "")), ...group.children.map(earliest)].filter(Number.isFinite);
+            value = dates.length > 0 ? Math.min(...dates) : -Infinity;
+            since.set(group, value);
+        }
+        return value;
+    };
     const sort = (groups: WorkItemGroup[]) => {
-        groups.sort((a, b) => b.id! - a.id!);
+        groups.sort((a, b) => earliest(b) - earliest(a) || b.id! - a.id!);
         for (const group of groups) sort(group.children);
     };
     sort(roots);
     return none.items.length > 0 ? [...roots, none] : roots;
+}
+
+/**
+ * When the item went into the branch (landedAt), so the dates follow the branch's order. Without commits, the pull
+ * request's completion, or its creation while it's open.
+ */
+export function itemDate(item: PlanItem): string | undefined {
+    return item.landedAt ?? item.pullRequest?.closedDate ?? item.pullRequest?.creationDate ?? item.commits[item.commits.length - 1]?.commit.author.date;
 }
 
 /** Every item in the group and the groups under it, each once. */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildPlan, findSyncPoint } from "../src/core/promotion";
-import type { GitCommitRef, GitPullRequest } from "../src/core/types";
+import type { AdoClient } from "../src/core/adoClient";
+import { buildPlan, createSyncPullRequest, findSyncPoint } from "../src/core/promotion";
+import type { GitChange, GitCommitRef, GitPullRequest, GitRepository, PushChange } from "../src/core/types";
 
 const id = (name: string) => name.padEnd(40, "0");
 
@@ -58,5 +59,53 @@ describe("findSyncPoint", () => {
 
         expect(findSyncPoint(buildPlan("develop", "main", merged, [copy(a), copy(f)], noMatches)).point?.commit.commitId).toBe(m.commitId);
         expect(findSyncPoint(buildPlan("develop", "main", merged, [copy(a)], noMatches)).point?.commit.commitId).toBe(a.commitId);
+    });
+});
+
+describe("createSyncPullRequest", () => {
+    it("sets the files both branches changed to the target's versions on top of the sync point", async () => {
+        const change = (changeType: string, path: string, objectId?: string, sourceServerItem?: string): GitChange => ({ changeType, item: { path, objectId }, sourceServerItem });
+        const calls: string[] = [];
+        let pushed: { changes: PushChange[] } | undefined;
+        let request: { sourceBranch: string; targetBranch: string } | undefined;
+        const client = {
+            getBranchHead: async (_repo: string, branch: string) => (branch === "main" ? "head" : "?"),
+            getMergeBase: async (_repo: string, a: string, b: string) => (a === id("a") && b === "head" ? "base" : "?"),
+            getDiff: async (_repo: string, from: string, to: string) =>
+                from === "base" && to === id("a")
+                    ? // What the source changed since the common ancestor.
+                      [{ changeType: "edit", item: { path: "/src", isFolder: true } }, change("edit", "/both.cs", "s1"), change("add", "/gone.cs", "s2"), change("edit", "/same.cs", "s3"), change("add", "/old.cs", "s4"), change("delete", "/readded.cs", "s5")]
+                    : from === id("a") && to === "head"
+                      ? // Where the target differs from the sync point.
+                        [change("edit", "/both.cs", "t1"), change("delete", "/gone.cs", "s2"), change("edit", "/targetOnly.cs", "t2"), change("rename", "/new.cs", "t3", "/old.cs"), change("add", "/readded.cs", "t4")]
+                      : [],
+            getFileBase64: async (_repo: string, path: string, commit: string) => `${path}@${commit}`,
+            createBranch: async (_repo: string, _branch: string, from: string) => void calls.push(`branch from ${from}`),
+            pushCommit: async (_repo: string, _branch: string, old: string, commit: { changes: PushChange[] }) => {
+                calls.push(`push onto ${old}`);
+                pushed = commit;
+            },
+            createPullRequest: async (_repo: string, r: { sourceBranch: string; targetBranch: string }) => {
+                calls.push("pull request");
+                request = r;
+                return { pullRequestId: 1 } as GitPullRequest;
+            }
+        } as unknown as AdoClient;
+        const repository: GitRepository = { id: "repo", name: "repo", webUrl: "https://dev.azure.com/org/project/_git/repo" };
+        const plan = buildPlan("develop", "main", [commit("a", [])], [], noMatches);
+
+        await createSyncPullRequest(client, repository, plan, { commit: plan.items[0].commits[0].commit, commitCount: 1 }, () => {});
+
+        expect(calls).toEqual([`branch from ${id("a")}`, `push onto ${id("a")}`, "pull request"]);
+        // same.cs is the same on both, targetOnly.cs only changed on the target, and new.cs isn't one the source touched:
+        // the merge takes the target's version of each by itself.
+        expect(pushed?.changes).toEqual([
+            { changeType: "edit", item: { path: "/both.cs" }, newContent: { content: "/both.cs@head", contentType: "base64encoded" } },
+            { changeType: "delete", item: { path: "/gone.cs" } },
+            { changeType: "delete", item: { path: "/old.cs" } },
+            { changeType: "add", item: { path: "/readded.cs" }, newContent: { content: "/readded.cs@head", contentType: "base64encoded" } }
+        ]);
+        expect(request?.targetBranch).toBe("main");
+        expect(request?.sourceBranch.startsWith("cherry-pick/main/sync/")).toBe(true);
     });
 });

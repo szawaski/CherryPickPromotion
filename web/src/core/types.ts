@@ -118,6 +118,11 @@ export interface PlanItem {
     promotedIn?: number;
     /** An active pull request into the source branch; it has no commits on the source yet. */
     openPullRequest?: boolean;
+    /**
+     * When the item went into the source: the date of the commit on the source's first-parent line that brought in its
+     * last commit (a pull request's merge or squash, a direct commit itself, or the merge that brought a branch in).
+     */
+    landedAt?: string;
     /** Earlier items with commits to promote that changed files this item's commits build on. */
     dependsOn?: ItemDependency[];
 }

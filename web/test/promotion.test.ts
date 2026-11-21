@@ -129,6 +129,27 @@ describe("buildPlan", () => {
         expect(reasons.get("y")).toBeUndefined();
     });
 
+    it("orders and dates items by the first-parent commit that brought them into the branch", () => {
+        // x lands Sep 10; f was written Aug 1 on a branch that merge m (no pull request) brought in Sep 20; y lands Sep 25.
+        const at = (c: GitCommitRef, date: string, authored = date): GitCommitRef => ({ ...c, author: { ...c.author, date: authored }, committer: { ...c.author, date } });
+        const source = [
+            at(commit("y", ["m"]), "2026-09-25T00:00:00Z"),
+            at(commit("m", ["x", "f"]), "2026-09-20T00:00:00Z"),
+            at(commit("x", ["base"]), "2026-09-10T00:00:00Z", "2026-07-01T00:00:00Z"),
+            at(commit("f", ["base"]), "2026-08-01T00:00:00Z"),
+            at(commit("base", []), "2026-07-01T00:00:00Z")
+        ];
+        const plan = buildPlan("develop", "main", source, [], matches());
+
+        expect(plan.items.map(i => [i.commits[0].commit.commitId[0], i.landedAt?.substring(0, 10)])).toEqual([
+            ["b", "2026-07-01"],
+            ["x", "2026-09-10"],
+            ["f", "2026-09-20"],
+            ["m", "2026-09-20"],
+            ["y", "2026-09-25"]
+        ]);
+    });
+
     // A promotion's commits are cherry-picks: new ids, same author, date and message.
     const picked = (original: GitCommitRef, id: string): GitCommitRef => ({ ...original, commitId: id.padEnd(40, "0"), parents: [] });
 

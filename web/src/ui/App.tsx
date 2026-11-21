@@ -21,7 +21,7 @@ import {
     type ResolveConflict
 } from "../core/promotion";
 import type { GitPullRequest, GitRepository, ItemDependency, PlanCommit, PlanItem, PromotionPlan } from "../core/types";
-import { groupByWorkItem, groupItems, loadWorkItems, workItemMatches, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
+import { groupByWorkItem, groupItems, itemDate, loadWorkItems, workItemMatches, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
 import "./styles.css";
 
 // Monaco is a few megabytes, so the editor loads the first time a conflict needs it.
@@ -511,9 +511,11 @@ export function App({ client }: Props) {
                                       expandedGroups={expandedGroups}
                                       expandAll={query.length > 0}
                                       conflictKey={conflictKey}
+                                      missing={missing}
                                       disabled={busy}
                                       onSelect={selectAll}
                                       onExpand={key => toggle(expandedGroups, key, setExpandedGroups)}
+                                      onOpen={keys => setExpandedGroups(new Set([...expandedGroups, ...keys]))}
                                       renderItem={renderItem}
                                   />
                               ))
@@ -556,7 +558,7 @@ export function App({ client }: Props) {
                                 <button
                                     className="cpp-link cpp-needs"
                                     disabled={busy}
-                                    title="Earlier items that changed the same files; the selection was likely written on top of them"
+                                    title={`Earlier items that changed the same files; the selection was likely written on top of them:\n${[...missing].map(([key, deps]) => `${itemLabel(key)} needs ${deps.map(d => itemLabel(d.key)).join(", ")}`).join("\n")}`}
                                     onClick={() => setSelected(withDependencies(plan, selected))}
                                 >
                                     ⚠ Add {missingCount} needed {missingCount === 1 ? "item" : "items"}
@@ -593,9 +595,13 @@ interface WorkItemGroupRowProps {
     expandAll: boolean;
     /** The item a promotion stopped at, if any. */
     conflictKey?: string;
+    /** Selected items' unselected dependencies, by item key. */
+    missing: ReadonlyMap<string, ItemDependency[]>;
     disabled: boolean;
     onSelect(keys: string[], value: boolean): void;
     onExpand(key: string): void;
+    /** Opens these groups, leaving the rest as they are. */
+    onOpen(keys: string[]): void;
     renderItem(item: PlanItem): ReactElement;
 }
 
@@ -615,7 +621,10 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
     const openPullRequests = all.filter(i => i.openPullRequest).length;
     const toPromote = selectable.length;
     const hasConflict = conflictKey !== undefined && all.some(i => i.key === conflictKey);
-    const earliest = all.map(itemDate).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+    // Selected items in here that need an unselected one, so it shows without opening the group.
+    const needing = all.filter(i => props.missing.has(i.key));
+    const needsText = needing.map(i => `${itemLabel(i.key)} needs ${props.missing.get(i.key)!.map(d => itemLabel(d.key)).join(", ")}`).join("; ");
+    const earliest = all.map(itemDate).filter((d): d is string => d !== undefined).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
     return (
         <li className="cpp-group">
             <div className="cpp-row cpp-group-row">
@@ -667,6 +676,15 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
                     </span>
                 )}
                 {hasConflict && <span className="cpp-tag cpp-tag-conflict">conflicts</span>}
+                {needing.length > 0 && (
+                    <button
+                        className="cpp-tag cpp-tag-needs"
+                        title={`Selected items here changed files that unselected earlier items changed first:\n${needsText}\nClick to open the groups down to them.`}
+                        onClick={() => props.onOpen(groupsLeadingTo(group, new Set(needing.map(i => i.key))))}
+                    >
+                        ⚠ {needsSummary(needing.map(i => i.key), props.missing)}
+                    </button>
+                )}
                 {toPromote > 0 && toPromote < all.length && <span className="cpp-tag">{toPromote} to promote</span>}
                 <span className="cpp-meta">
                     {all.length} items{count > 0 ? ` · ${count} selected` : ""}{earliest ? ` · since ${formatDate(earliest)}` : ""}
@@ -725,11 +743,11 @@ function ItemRow({ item, repository, checked, expanded, conflict, disabled, need
                         title={`Changes files that unselected earlier items changed first; select them too:\n${needs.map(d => `${itemLabel(d.key)}: ${d.paths.join(", ")}`).join("\n")}`}
                         onClick={() => onSelectNeeded(needs.map(d => d.key))}
                     >
-                        needs {needs.map(d => itemLabel(d.key)).join(", ")}
+                        needs {needs.length <= 2 ? needs.map(d => itemLabel(d.key)).join(", ") : `${needs.length} items`}
                     </button>
                 )}
                 <span className="cpp-meta">
-                    {pullRequest ? pullRequest.createdBy.displayName : last!.author.name} · {formatDate(itemDate(item))}
+                    {pullRequest ? pullRequest.createdBy.displayName : last!.author.name} · {formatDate(itemDate(item)!)}
                 </span>
                 <span className="cpp-workitems">
                     {item.workItemIds.map(id => (
@@ -789,6 +807,21 @@ function CommitSummary({ commit, repository, hideReason }: { commit: PlanCommit;
 }
 
 /** "!123" for a pull request item, the short commit id for a commit item. */
+/** A short label for items that need others: names while it's short, counts once it isn't (the tooltip lists them). */
+function needsSummary(keys: string[], missing: ReadonlyMap<string, ItemDependency[]>): string {
+    const needed = new Set(keys.flatMap(key => missing.get(key)!.map(d => d.key)));
+    const names = (list: string[]) => list.map(itemLabel).join(", ");
+    if (keys.length === 1) return `${itemLabel(keys[0])} needs ${needed.size <= 2 ? names([...needed]) : `${needed.size} items`}`;
+    return `${keys.length} items need ${needed.size === 1 ? names([...needed]) : `${needed.size} others`}`;
+}
+
+/** The group and the groups under it that hold one of the items, so opening them shows each item. */
+function groupsLeadingTo(group: WorkItemGroup, keys: ReadonlySet<string>): string[] {
+    const below = group.children.flatMap(child => groupsLeadingTo(child, keys));
+    const holds = below.length > 0 || group.items.some(i => keys.has(i.key));
+    return holds ? [group.key, ...below] : [];
+}
+
 function itemLabel(key: string): string {
     return key.startsWith("pr:") ? `!${key.substring(3)}` : key.substring("commit:".length, "commit:".length + 8);
 }
@@ -808,12 +841,6 @@ function matchesFilter(item: PlanItem, query: string): boolean {
             c.commit.author.name.toLowerCase().includes(query) ||
             c.commit.author.email.toLowerCase().includes(query)
     );
-}
-
-/** When the item landed: its pull request's completion (or creation, while open), else its last commit. */
-function itemDate(item: PlanItem): string {
-    const pullRequest = item.pullRequest;
-    return pullRequest ? (pullRequest.closedDate ?? pullRequest.creationDate) : item.commits[item.commits.length - 1].commit.author.date;
 }
 
 function formatDate(value: string): string {

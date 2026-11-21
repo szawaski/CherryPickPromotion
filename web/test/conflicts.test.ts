@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AdoClient } from "../src/core/adoClient";
-import { buildPushChanges, countConflicts, mergeText, prepareMerge } from "../src/core/conflicts";
+import { buildPushChanges, countConflicts, findConflictBlocks, mergeText, prepareMerge, strayConflictMarkers, unresolvedInText } from "../src/core/conflicts";
 import type { GitChange, GitCommitRef, GitFile } from "../src/core/types";
 
 const labels = { current: "main", incoming: "abc12345 (develop)" };
@@ -126,5 +126,32 @@ describe("prepareMerge", () => {
         const prepared = await prepareMerge(client, "repo", commit, "head", labels);
 
         await expect(buildPushChanges(client, "repo", prepared, new Map())).rejects.toThrow("/a has no resolution.");
+    });
+});
+
+describe("unresolvedInText", () => {
+    const block = "<<<<<<< current\na\n=======\nb\n>>>>>>> incoming\n";
+
+    it("counts complete blocks", () => {
+        expect(findConflictBlocks(`x\n${block}y\n`)).toEqual([{ start: 2, middle: 4, end: 6 }]);
+        expect(unresolvedInText(`x\n${block}y\n${block}`)).toBe(2);
+        expect(unresolvedInText("x\ny\n")).toBe(0);
+    });
+
+    it("counts a marker line left behind when the rest of its block was deleted", () => {
+        // The ======= and >>>>>>> lines were deleted but the <<<<<<< line was kept.
+        const text = "x\n<<<<<<< current\na\ny\n";
+        expect(findConflictBlocks(text)).toEqual([]);
+        expect(strayConflictMarkers(text)).toEqual([2]);
+        expect(unresolvedInText(text)).toBe(1);
+        expect(strayConflictMarkers("a\nb\n>>>>>>> incoming\n")).toEqual([3]);
+    });
+
+    it("leaves a lone ======= alone, as files use it", () => {
+        expect(unresolvedInText("Title\n=======\ntext\n")).toBe(0);
+    });
+
+    it("reads files with Windows line endings", () => {
+        expect(unresolvedInText(block.replace(/\n/g, "\r\n"))).toBe(1);
     });
 });

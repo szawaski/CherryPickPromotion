@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { conflictEnd, conflictMiddle, conflictStart, countConflicts, type ConflictFile, type FileResolution } from "../core/conflicts";
+import { findConflictBlocks, strayConflictMarkers, unresolvedInText, type ConflictBlock, type ConflictFile, type FileResolution } from "../core/conflicts";
 import { firstLine, type ConflictAnswer, type ConflictRequest } from "../core/promotion";
 import * as monaco from "./monaco";
 
@@ -17,11 +17,7 @@ interface Props {
     onDone(answer: ConflictAnswer): void;
 }
 
-interface Block {
-    start: number;
-    middle: number;
-    end: number;
-}
+type Block = ConflictBlock;
 
 export default function ConflictEditor({ request, onDone }: Props) {
     const { files, labels, commit, item } = request;
@@ -45,8 +41,12 @@ export default function ConflictEditor({ request, onDone }: Props) {
         };
     }, [models]);
 
-    const remaining = (file: ConflictFile) => (file.kind === "content" ? countConflicts(models.get(file.path)!.getValue()) : choices.has(file.path) ? 0 : 1);
+    const remaining = (file: ConflictFile) => (file.kind === "content" ? unresolvedInText(models.get(file.path)!.getValue()) : choices.has(file.path) ? 0 : 1);
     const unresolved = files.reduce((n, f) => n + remaining(f), 0);
+    const left = files.map((f, i) => ({ f, i, n: remaining(f) })).filter(x => x.n > 0);
+    const leftText = left.map(x => `${x.f.path.split("/").pop()} (${x.n})`).join(", ");
+    // The next file with something left, after the one shown.
+    const nextLeft = left.find(x => x.i > fileIndex) ?? left[0];
     const file = files[fileIndex] as ConflictFile | undefined;
 
     function commitResolution() {
@@ -86,7 +86,7 @@ export default function ConflictEditor({ request, onDone }: Props) {
 
             <footer className="cpp-conflict-footer">
                 <span className="cpp-meta">
-                    {unresolved === 0 ? "All conflicts resolved." : `${unresolved} conflicts left.`}
+                    {unresolved === 0 ? "All conflicts resolved." : `${unresolved} left to resolve in ${leftText}.`}
                     {request.autoMerged.length > 0 && ` ${request.autoMerged.length} other files merged on their own.`}
                 </span>
                 <button onClick={() => onDone("abort")} title="Create no pull request and remove the branches made so far; the selection stays as it is">
@@ -95,7 +95,12 @@ export default function ConflictEditor({ request, onDone }: Props) {
                 <button onClick={() => onDone("skip")} title="Leave this item and everything after it out; they stay selected for next time">
                     Stop and create PR up to here
                 </button>
-                <button className="cpp-primary" disabled={unresolved > 0} onClick={commitResolution}>
+                {nextLeft && (nextLeft.i !== fileIndex || left.length > 1) && (
+                    <button onClick={() => setFileIndex(nextLeft.i)} title={nextLeft.f.path}>
+                        Go to {nextLeft.f.path.split("/").pop()}
+                    </button>
+                )}
+                <button className="cpp-primary" disabled={unresolved > 0} onClick={commitResolution} title={unresolved > 0 ? `Resolve what's left first: ${leftText}` : undefined}>
                     Commit and continue
                 </button>
             </footer>
@@ -109,6 +114,7 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
     const resultEditor = useRef<monaco.editor.IStandaloneCodeEditor>();
     const [blockIndex, setBlockIndex] = useState(0);
     const [blocks, setBlocks] = useState<Block[]>(() => findBlocks(model));
+    const [stray, setStray] = useState<number[]>(() => strayConflictMarkers(model.getValue()));
 
     useEffect(() => {
         const theme = isDark() ? "vs-dark" : "vs";
@@ -124,6 +130,7 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
         const refresh = () => {
             const found = findBlocks(model);
             setBlocks(found);
+            setStray(strayConflictMarkers(model.getValue()));
             decorations.set(found.flatMap(blockDecorations));
         };
         refresh();
@@ -179,7 +186,16 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
             </div>
             <div className="cpp-conflict-diff" ref={diffHost} />
             <div className="cpp-conflict-toolbar">
-                <span className="cpp-meta">{blocks.length === 0 ? "No conflicts left in this file." : `Conflict ${Math.min(blockIndex, blocks.length - 1) + 1} of ${blocks.length} in ${file.path}`}</span>
+                <span className="cpp-meta">
+                    {blocks.length > 0
+                        ? `Conflict ${Math.min(blockIndex, blocks.length - 1) + 1} of ${blocks.length} in ${file.path}`
+                        : stray.length > 0
+                          ? `A leftover conflict marker line is still in the file, on line ${stray.join(", ")}; delete it.`
+                          : "No conflicts left in this file."}
+                </span>
+                {blocks.length === 0 && stray.length > 0 && (
+                    <button onClick={() => revealLine(resultEditor.current!, stray[0])}>Go to line {stray[0]}</button>
+                )}
                 <button disabled={blocks.length < 2} onClick={() => go(blockIndex - 1)}>Prev</button>
                 <button disabled={blocks.length < 2} onClick={() => go(blockIndex + 1)}>Next</button>
                 <button disabled={!current} onClick={() => take("current")}>Take current</button>
@@ -223,24 +239,8 @@ function WholeFileConflict({ file, labels, choice, onChoose }: { file: ConflictF
     );
 }
 
-/** Conflict blocks as 1-based line numbers of their <<<<<<<, ======= and >>>>>>> lines. */
 function findBlocks(model: monaco.editor.ITextModel): Block[] {
-    const blocks: Block[] = [];
-    let start = 0;
-    let middle = 0;
-    model.getLinesContent().forEach((line, i) => {
-        const number = i + 1;
-        if (line.startsWith(conflictStart)) {
-            start = number;
-            middle = 0;
-        } else if (start && !middle && line === conflictMiddle) {
-            middle = number;
-        } else if (start && middle && line.startsWith(conflictEnd)) {
-            blocks.push({ start, middle, end: number });
-            start = 0;
-        }
-    });
-    return blocks;
+    return findConflictBlocks(model.getValue());
 }
 
 function blockDecorations(block: Block): monaco.editor.IModelDeltaDecoration[] {
@@ -253,6 +253,12 @@ function blockDecorations(block: Block): monaco.editor.IModelDeltaDecoration[] {
         ...lines(block.middle + 1, block.end - 1, "cpp-conflict-incoming"),
         ...lines(block.end, block.end, "cpp-conflict-marker")
     ];
+}
+
+function revealLine(editor: monaco.editor.IStandaloneCodeEditor, line: number) {
+    editor.revealLineInCenter(line);
+    editor.setPosition({ lineNumber: line, column: 1 });
+    editor.focus();
 }
 
 function reveal(editor: monaco.editor.IStandaloneCodeEditor, block: Block | undefined) {

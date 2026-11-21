@@ -28,9 +28,9 @@ Shows the list as a tree of work items and their parents (task → backlog item 
 
 ## Rebase PR
 
-Cherry-picks don't carry history, so old promoted commits keep being checked. When everything on the source up to a commit is already on the target, select **Create rebase PR into \<target\>**. This opens a pull request that merges the source, as of that commit, into the target. Nothing changes until it's completed.
+Cherry-picks don't carry history, so old promoted commits keep being checked. When everything on the source up to a commit is already on the target, select **Create rebase PR into \<target\>**. This opens a pull request that joins the source's history, up to that commit, to the target's. Its branch sets the files both branches changed to the target's versions first, so it changes no files and has no conflicts, even where later promotions brought newer versions of the same files or deleted them.
 
-Complete it with **Merge (no fast-forward)**, not squash. It should change little or nothing, and afterwards the list starts from that point.
+Complete it with **Merge (no fast-forward)**, not squash. Afterwards the list starts from that point.
 
 ## Conflicts
 

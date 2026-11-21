@@ -238,12 +238,47 @@ export class AdoClient {
         return btoa(binary);
     }
 
-    /** Pushes one commit onto an existing branch whose head is oldObjectId. */
-    async pushCommit(repositoryId: string, branch: string, oldObjectId: string, commit: { comment: string; author: GitUserDate; changes: PushChange[] }): Promise<void> {
+    /**
+     * Pushes one commit onto an existing branch whose head is oldObjectId. Azure DevOps rejects parents here, so the
+     * commit always goes on the branch head; without an author it's the caller.
+     */
+    async pushCommit(repositoryId: string, branch: string, oldObjectId: string, commit: { comment: string; author?: GitUserDate; changes: PushChange[] }): Promise<void> {
         await this.send("POST", this.gitUrl(`repositories/${repositoryId}/pushes`), {
             refUpdates: [{ name: fullBranchName(branch), oldObjectId }],
             commits: [{ comment: commit.comment, author: commit.author, changes: commit.changes }]
         });
+    }
+
+    async getMergeBase(repositoryId: string, commitId: string, otherCommitId: string): Promise<string> {
+        const result = await this.send<{ value: { commitId: string }[] }>(
+            "GET",
+            this.gitUrl(`repositories/${repositoryId}/commits/${commitId}/mergebases`, { otherCommitId, "api-version": "7.1-preview.1" })
+        );
+        const base = result.value[0]?.commitId;
+        if (!base) throw new Error(`${commitId.substring(0, 8)} and ${otherCommitId.substring(0, 8)} have no common ancestor.`);
+        return base;
+    }
+
+    /** The files that differ between two commits, compared directly rather than from their common ancestor. */
+    async getDiff(repositoryId: string, baseCommitId: string, targetCommitId: string): Promise<GitChange[]> {
+        const changes: GitChange[] = [];
+        const pageSize = 2000;
+        for (;;) {
+            const page = await this.send<{ changes: GitChange[] }>(
+                "GET",
+                this.gitUrl(`repositories/${repositoryId}/diffs/commits`, {
+                    baseVersion: baseCommitId,
+                    baseVersionType: "commit",
+                    targetVersion: targetCommitId,
+                    targetVersionType: "commit",
+                    diffCommonCommit: false,
+                    $top: pageSize,
+                    $skip: changes.length
+                })
+            );
+            changes.push(...page.changes);
+            if (page.changes.length < pageSize) return changes;
+        }
     }
 
     createPullRequest(
@@ -298,7 +333,7 @@ export class AdoClient {
         for (const [key, value] of Object.entries(query)) {
             if (value !== undefined) params.set(key, String(value));
         }
-        params.set("api-version", "7.1");
+        if (!params.has("api-version")) params.set("api-version", "7.1");
         return `${this.connection.baseUrl}${encodeURIComponent(this.connection.project)}/_apis/${path}?${params}`;
     }
 
@@ -312,7 +347,7 @@ export class AdoClient {
         const headers: Record<string, string> = { Accept: accept, ...(await this.connection.getHeaders()) };
         if (body !== undefined) headers["Content-Type"] = "application/json";
 
-        const response = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: this.signal });
+        const response = await this.fetchWithRetry(method, url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: this.signal });
         if (!response.ok) {
             const request = `${method} ${url.split("/_apis/")[1]?.split("?")[0] ?? url}`;
             let detail = "";
@@ -334,6 +369,47 @@ export class AdoClient {
         }
         return response;
     }
+
+    /**
+     * Sends the request, trying again after a pause when Azure DevOps is briefly unavailable: busy or throttling (503,
+     * 429) for any request, since those are turned away before anything happens, and other server errors or a dropped
+     * connection only for reads, so a write never runs twice. Waits as long as Retry-After asks, else 1, 2 then 4 s.
+     */
+    private async fetchWithRetry(method: string, url: string, init: RequestInit): Promise<Response> {
+        const read = method === "GET";
+        for (let attempt = 0; ; attempt++) {
+            let response: Response | undefined;
+            try {
+                response = await fetch(url, init);
+            } catch (error) {
+                if (!read || attempt >= retryDelaysMs.length || this.signal?.aborted) throw error;
+            }
+            if (response) {
+                const transient = response.status === 503 || response.status === 429 || (read && (response.status === 500 || response.status === 502 || response.status === 504));
+                if (!transient || attempt >= retryDelaysMs.length) return response;
+            }
+            const retryAfter = Number(response?.headers.get("retry-after"));
+            await delay(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 30) * 1000 : retryDelaysMs[attempt], this.signal);
+        }
+    }
+}
+
+const retryDelaysMs = [1000, 2000, 4000];
+
+/** Waits, ending early with an AbortError when the signal is aborted. */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(signal.reason);
+        const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal!.reason);
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
 }
 
 function addMatches(target: Map<string, GitPullRequest[]>, result: Record<string, GitPullRequest[]> | undefined) {

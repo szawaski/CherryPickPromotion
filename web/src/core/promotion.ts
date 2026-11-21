@@ -1,6 +1,7 @@
 import { AdoClient, fullBranchName, shortBranchName } from "./adoClient";
 import { buildPushChanges, prepareMerge, type ConflictFile, type ConflictLabels, type FileResolution } from "./conflicts";
 import type {
+    GitChange,
     GitCommitRef,
     GitPullRequest,
     GitRepository,
@@ -10,7 +11,8 @@ import type {
     Promotion,
     PromotionPlan,
     PromotionResult,
-    PullRequestMatches
+    PullRequestMatches,
+    PushChange
 } from "./types";
 
 export type Progress = (message: string) => void;
@@ -92,6 +94,8 @@ export async function analyzePromotion(client: AdoClient, repository: GitReposit
 
     const plan = buildPlan(sourceBranch, targetBranch, sourceOnly, targetOnly, matches, promotions, activeIntoSource);
     plan.openSyncPullRequest = activeIntoTarget.find(isSync);
+    await matchReferencesOnTarget(client, repository, plan, targetOnly, progress);
+    await matchMessageOnTarget(client, repository, plan, targetOnly, progress);
     await matchContentOnTarget(client, repository, plan, progress);
 
     const pullRequestItems = plan.items.filter(i => i.pullRequest);
@@ -102,6 +106,159 @@ export async function analyzePromotion(client: AdoClient, repository: GitReposit
     });
 
     return plan;
+}
+
+/** Remembers which pull requests a commit's message names; commits don't change, so entries never go stale. */
+export interface ReferenceCache {
+    get(commitId: string): number[] | undefined;
+    set(commitId: string, pullRequestIds: number[]): void;
+}
+
+/**
+ * Marks pull requests the target says it holds: a commit on the target whose message names the pull request
+ * ("PR 57066", "PRs 59347, 59350", "!57066", "pull request 61413", or a list line starting with its number, as
+ * release pull request descriptions list what they carry), or whose first line is the pull request's title. Azure
+ * DevOps cuts long messages off at 200 characters, so those are read in full, once per commit thanks to the cache.
+ */
+export async function matchReferencesOnTarget(
+    client: AdoClient,
+    repository: GitRepository,
+    plan: PromotionPlan,
+    targetOnly: GitCommitRef[],
+    progress: Progress,
+    cache: ReferenceCache = browserReferenceCache()
+): Promise<void> {
+    const pending = plan.items.filter(i => i.pullRequest && i.hasPendingCommits);
+    if (pending.length === 0 || targetOnly.length === 0) return;
+
+    const unread = targetOnly.filter(c => c.commentTruncated && !cache.get(c.commitId));
+    if (unread.length > 0) progress(`Reading ${unread.length} long commit messages on ${plan.targetBranch}…`);
+    const referencedBy = new Map<number, string>();
+    await forEachParallel(targetOnly, async commit => {
+        let ids = commit.commentTruncated ? cache.get(commit.commitId) : referencedPullRequests(commit.comment);
+        if (!ids) {
+            try {
+                ids = referencedPullRequests((await client.getCommit(repository.id, commit.commitId)).comment);
+                cache.set(commit.commitId, ids);
+            } catch {
+                ids = referencedPullRequests(commit.comment);
+            }
+        }
+        for (const id of ids) if (!referencedBy.has(id)) referencedBy.set(id, commit.commitId);
+    });
+    const byTitle = new Map(targetOnly.map(c => [normalizedMessage(c.comment), c.commitId]));
+
+    for (const item of pending) {
+        const pullRequest = item.pullRequest!;
+        const title = normalizedMessage(pullRequest.title);
+        const referenced = referencedBy.get(pullRequest.pullRequestId);
+        // A short title like "Fix tests" could be anything, so only a distinctive one counts.
+        const sameTitle = title.length >= 20 ? byTitle.get(title) : undefined;
+        const by = referenced ?? sameTitle;
+        if (!by) continue;
+        const reason = referenced ? `named by ${by.substring(0, 8)} on ${plan.targetBranch}` : `same title as ${by.substring(0, 8)} on ${plan.targetBranch}`;
+        for (const commit of item.commits) if (!commit.isMerge && !commit.promotedReason) commit.promotedReason = reason;
+        item.hasPendingCommits = false;
+    }
+}
+
+/** The pull request numbers a commit message names. */
+export function referencedPullRequests(message: string): number[] {
+    const number = String.raw`!?\d{4,6}`;
+    const patterns = [
+        new RegExp(String.raw`(?:\bPRs?\b|\bpull requests?\b)\s*[#:]?\s*((?:${number})(?:\s*(?:,|&|\band\b)\s*${number})*)`, "gi"),
+        /(?<![\w/])!(\d{4,6})\b/g,
+        /^[ \t]*[>*+-][ \t]*!?(\d{5,6})\b(?=[ \t])/gm
+    ];
+    const ids = new Set<number>();
+    for (const pattern of patterns) {
+        for (const match of message.matchAll(pattern)) for (const id of match[1].match(/\d{4,6}/g) ?? []) ids.add(Number(id));
+    }
+    return [...ids];
+}
+
+/** A ReferenceCache in the browser's local storage, or in memory where there is none. */
+function browserReferenceCache(): ReferenceCache {
+    const key = "cherryPickPromotion.commitReferences";
+    let entries: Record<string, number[]> = {};
+    let storage: Storage | undefined;
+    try {
+        storage = globalThis.localStorage;
+        entries = JSON.parse(storage?.getItem(key) ?? "{}");
+    } catch {
+        storage = undefined;
+    }
+    let saving: ReturnType<typeof setTimeout> | undefined;
+    return {
+        get: commitId => entries[commitId],
+        set: (commitId, ids) => {
+            entries[commitId] = ids;
+            // Written once the burst of lookups is over, not once per commit.
+            saving ??= setTimeout(() => {
+                saving = undefined;
+                try {
+                    storage?.setItem(key, JSON.stringify(entries));
+                } catch {
+                    // full or unavailable: the lookups run again next time
+                }
+            });
+        }
+    };
+}
+
+/**
+ * Marks commits recommitted on the target by hand: a target commit with the same message, ignoring a "Merged PR n:"
+ * prefix and leading [tags] (so a squash merge matches the commit it squashed), that changes exactly the same files.
+ * The author and date can differ, and the target may have changed those files since. Only commits whose message
+ * matches are looked up, two requests each; a failed lookup leaves the commit to promote.
+ */
+export async function matchMessageOnTarget(client: AdoClient, repository: GitRepository, plan: PromotionPlan, targetOnly: GitCommitRef[], progress: Progress): Promise<void> {
+    const byMessage = new Map<string, GitCommitRef[]>();
+    for (const commit of targetOnly) {
+        const message = normalizedMessage(commit.comment);
+        if (message) byMessage.set(message, [...(byMessage.get(message) ?? []), commit]);
+    }
+    const candidates = plan.items
+        .flatMap(i => i.commits)
+        .filter(c => !c.isMerge && !c.promotedReason)
+        .map(c => [c, byMessage.get(normalizedMessage(c.commit.comment)) ?? []] as const)
+        .filter(([, matches]) => matches.length > 0);
+    if (candidates.length === 0) return;
+
+    progress(`Comparing ${candidates.length} commits with ${plan.targetBranch} commits of the same message…`);
+    const paths = new Map<string, Promise<string | undefined>>();
+    // The files a commit changes, as one comparable string; undefined when they can't be read.
+    const filesOf = (commitId: string) => {
+        let files = paths.get(commitId);
+        if (!files) {
+            files = client.getCommitChanges(repository.id, commitId).then(
+                changes => changes.filter(c => !c.item.isFolder && c.item.gitObjectType !== "tree").flatMap(changedPaths).sort().join("\n"),
+                () => undefined
+            );
+            paths.set(commitId, files);
+        }
+        return files;
+    };
+    await forEachParallel([...candidates], async ([commit, matches]) => {
+        const files = await filesOf(commit.commit.commitId);
+        if (!files) return;
+        for (const match of matches) {
+            if ((await filesOf(match.commitId)) !== files) continue;
+            commit.promotedReason = `same message and files as ${match.commitId.substring(0, 8)} on ${plan.targetBranch}`;
+            return;
+        }
+    });
+    for (const item of plan.items) {
+        if (item.commits.length > 0) item.hasPendingCommits = item.commits.some(c => !c.isMerge && !c.promotedReason);
+    }
+}
+
+/** A commit's first line, lowercase, without a "Merged PR n:" prefix or leading [tags]. */
+function normalizedMessage(comment: string): string {
+    return firstLine(comment)
+        .toLowerCase()
+        .replace(/^(\s*(merged pr \d+:|\[[^\]]*\]))+/, "")
+        .trim();
 }
 
 /**
@@ -307,9 +464,18 @@ export function buildPlan(
         item.promotedIn ??= openPromotions.get(commit.commitId);
     }
 
-    // An item lands when its last commit does, which for a pull request is its merge.
-    const landed = (item: PlanItem) => item.commits[item.commits.length - 1].order;
-    const items = [...itemsByKey.values()].sort((a, b) => landed(a) - landed(b));
+    // An item lands when the source's first-parent line brings in its last commit, which for a pull request is its
+    // merge. Items brought in by the same commit keep their order.
+    const landing = landingCommits(planned.map(p => p.planCommit));
+    const steps = new Map<PlanItem, number>();
+    for (const item of itemsByKey.values()) {
+        const lands = item.commits.map(c => landing.get(c.commit.commitId)).reduce((a, b) => (b && (!a || b.step > a.step) ? b : a), undefined);
+        const by = lands?.by ?? item.commits[item.commits.length - 1];
+        steps.set(item, lands?.step ?? -1);
+        item.landedAt = by.commit.committer?.date ?? by.commit.author.date;
+    }
+    const last = (item: PlanItem) => item.commits[item.commits.length - 1].order;
+    const items = [...itemsByKey.values()].sort((a, b) => steps.get(a)! - steps.get(b)! || last(a) - last(b));
 
     // Open pull requests haven't landed yet, so they go after everything that has.
     for (const pullRequest of [...openPullRequests].sort((a, b) => a.creationDate.localeCompare(b.creationDate))) {
@@ -542,13 +708,8 @@ export function findSyncPoint(plan: PromotionPlan): SyncSearch {
     const commits = plan.items.flatMap(i => i.commits);
     if (commits.length === 0) return {};
     const byId = new Map(commits.map(c => [c.commit.commitId, c]));
-    const parents = new Set(commits.flatMap(c => c.commit.parents ?? []));
-    const head = commits.filter(c => !parents.has(c.commit.commitId)).sort((a, b) => b.order - a.order)[0];
-    if (!head) return {};
-
-    // The mainline, oldest first.
-    const mainline: PlanCommit[] = [];
-    for (let c: PlanCommit | undefined = head; c; c = byId.get(c.commit.parents?.[0] ?? "")) mainline.unshift(c);
+    const mainline = mainlineOf(commits);
+    if (mainline.length === 0) return {};
 
     // Each mainline commit brings in the ones behind it; once one of those isn't on the target, nothing later qualifies.
     const behind = new Set<string>();
@@ -565,14 +726,58 @@ export function findSyncPoint(plan: PromotionPlan): SyncSearch {
 }
 
 /**
- * Opens a pull request that merges the source, as of the sync point, into the target. It changes few or no files, but
- * once it's completed as a merge the target has the source's history up to there.
+ * Opens a pull request that joins the source's history, up to the sync point, to the target's without changing a file.
+ *
+ * Merging the sync point as it is would go wrong: the target took newer versions of many files through later
+ * promotions, including files deleted on the source since, and a three-way merge from an old common ancestor can't
+ * tell those are right. It conflicts, and where it doesn't, it can bring back what the target left behind. Every change
+ * up to the sync point is on the target already, so the target's files are the answer (git's "ours" merge). Azure
+ * DevOps can't push a merge commit, so the branch starts at the sync point and one commit sets every file both sides
+ * changed since their common ancestor to the target's version. Merging that only meets changes identical to the
+ * target's or ones the target made alone, so it can't conflict and leaves the target's files exactly as they are.
  */
 export async function createSyncPullRequest(client: AdoClient, repository: GitRepository, plan: PromotionPlan, point: SyncPoint, progress: Progress): Promise<GitPullRequest> {
     const branch = `${syncBranchPrefix(plan.targetBranch)}${timestamp(new Date())}`;
-    const sha = point.commit.commitId.substring(0, 8);
+    const syncId = point.commit.commitId;
+    const sha = syncId.substring(0, 8);
+
+    progress(`Comparing ${plan.sourceBranch} at ${sha} with ${plan.targetBranch}…`);
+    const head = await client.getBranchHead(repository.id, plan.targetBranch);
+    const base = await client.getMergeBase(repository.id, syncId, head);
+    const [sourceChanges, toTarget] = await Promise.all([client.getDiff(repository.id, base, syncId), client.getDiff(repository.id, syncId, head)]);
+    const changedOnSource = new Set(sourceChanges.flatMap(changedPaths));
+    // The files the target has differently: its blob for each, or undefined where the target doesn't have it.
+    const onTarget = new Map<string, string | undefined>();
+    for (const change of toTarget) {
+        if (change.item.isFolder || change.item.gitObjectType === "tree") continue;
+        onTarget.set(change.item.path, change.changeType.includes("delete") ? undefined : change.item.objectId);
+        if (change.changeType.includes("rename") && change.sourceServerItem) onTarget.set(change.sourceServerItem, undefined);
+    }
+    const toAlign = [...onTarget].filter(([path]) => changedOnSource.has(path));
+
     progress(`Creating ${branch} at ${sha}…`);
-    await client.createBranch(repository.id, branch, point.commit.commitId);
+    await client.createBranch(repository.id, branch, syncId);
+    if (toAlign.length > 0) {
+        progress(`Setting ${toAlign.length} files to ${plan.targetBranch}'s versions…`);
+        // A file the target has is edited where the sync point has it too, and added where it doesn't.
+        const atSyncPoint = new Set(toTarget.filter(c => !c.changeType.includes("add")).map(c => (c.changeType.includes("rename") && c.sourceServerItem ? c.sourceServerItem : c.item.path)));
+        const changes: PushChange[] = [];
+        await forEachParallel(toAlign, async ([path, blob]) => {
+            if (blob === undefined) {
+                changes.push({ changeType: "delete", item: { path } });
+            } else {
+                const content = await client.getFileBase64(repository.id, path, head);
+                changes.push({ changeType: atSyncPoint.has(path) ? "edit" : "add", item: { path }, newContent: { content, contentType: "base64encoded" } });
+            }
+        });
+        changes.sort((a, b) => a.item.path.localeCompare(b.item.path));
+        await withStep(`The branch ${branch} is created, but setting its files to ${plan.targetBranch}'s`, () =>
+            client.pushCommit(repository.id, branch, syncId, {
+                comment: `Match ${plan.targetBranch}'s files on top of ${plan.sourceBranch} at ${sha}, so merging it changes nothing`,
+                changes
+            })
+        );
+    }
     progress("Creating the rebase PR…");
     return withStep(`The branch ${branch} is ready, but creating the pull request`, () =>
         client.createPullRequest(repository.id, {
@@ -585,12 +790,19 @@ export async function createSyncPullRequest(client: AdoClient, repository: GitRe
                 "",
                 "**Complete it with Merge (no fast-forward).** A squash merge would leave the histories apart and the commits listed again.",
                 "",
-                "Expect few or no file changes; any that show up are differences between the cherry-picks and the originals, such as conflict resolutions, and are worth a look."
+                `It changes no files. ${plan.targetBranch} took newer versions of some files through later promotions, so the branch's last commit sets the ` +
+                    `${toAlign.length} files both branches changed back to ${plan.targetBranch}'s versions, and merging leaves ${plan.targetBranch} as it is.`
             ].join("\n"),
             workItemIds: [],
             mergeStrategy: "noFastForward"
         })
     );
+}
+
+/** The paths a change touches: its own, and the old one of a rename. */
+function changedPaths(change: GitChange): string[] {
+    if (change.item.isFolder || change.item.gitObjectType === "tree") return [];
+    return change.changeType.includes("rename") && change.sourceServerItem ? [change.item.path, change.sourceServerItem] : [change.item.path];
 }
 
 /**
@@ -764,6 +976,26 @@ async function withStep<T>(step: string, action: () => Promise<T>): Promise<T> {
     } catch (error) {
         throw new Error(`${step} failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+}
+
+/** The source's first-parent line among the commits, oldest first, from the newest commit nothing else builds on. */
+function mainlineOf(commits: PlanCommit[]): PlanCommit[] {
+    const byId = new Map(commits.map(c => [c.commit.commitId, c]));
+    const parents = new Set(commits.flatMap(c => c.commit.parents ?? []));
+    const head = commits.filter(c => !parents.has(c.commit.commitId)).sort((a, b) => b.order - a.order)[0];
+    const mainline: PlanCommit[] = [];
+    for (let c: PlanCommit | undefined = head; c; c = byId.get(c.commit.parents?.[0] ?? "")) mainline.unshift(c);
+    return mainline;
+}
+
+/** For each commit, the first-parent commit that brought it into the source, and that commit's place on the line. */
+function landingCommits(commits: PlanCommit[]): Map<string, { by: PlanCommit; step: number }> {
+    const byId = new Map(commits.map(c => [c.commit.commitId, c]));
+    const landing = new Map<string, { by: PlanCommit; step: number }>();
+    for (const [step, by] of mainlineOf(commits).entries()) {
+        for (const id of reachable(byId, [by.commit.commitId])) if (!landing.has(id)) landing.set(id, { by, step });
+    }
+    return landing;
 }
 
 /** Commit ids in the plan reachable from the starting ids through parents that are also in the plan. */
