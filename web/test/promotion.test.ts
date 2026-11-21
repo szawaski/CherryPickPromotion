@@ -114,6 +114,21 @@ describe("buildPlan", () => {
         expect(plan.items.find(i => i.key !== "pr:7")!.hasPendingCommits).toBe(true);
     });
 
+    it("doesn't pass a merge's reason to commits it shares with its mainline through a nested merge", () => {
+        // base <- x (on develop) <- y (develop, PR 7's mainline); feature f merged develop in with n (f, x), then PR 7
+        // merged it with m (y, n). m alone was cherry-picked to main, which brings f and n but not x.
+        const merge = commit("m", ["y", "n"], "Merged PR 7: change");
+        const copy = { ...commit("c", ["t"]), author: merge.author, comment: merge.comment };
+        const source = [merge, commit("n", ["f", "x"], "Merge develop into feature"), commit("y", ["x"]), commit("f", ["base"]), commit("x", ["base"]), commit("base", [])];
+        const plan = buildPlan("develop", "main", source, [copy], matches());
+
+        const reasons = new Map(plan.items.flatMap(i => i.commits).map(c => [c.commit.commitId[0], c.promotedReason]));
+        expect(reasons.get("f")).toBe("merged in by m0000000, which is same author, date and message as c0000000 on main");
+        expect(reasons.get("n")).toBe("merged in by m0000000, which is same author, date and message as c0000000 on main");
+        expect(reasons.get("x")).toBeUndefined();
+        expect(reasons.get("y")).toBeUndefined();
+    });
+
     // A promotion's commits are cherry-picks: new ids, same author, date and message.
     const picked = (original: GitCommitRef, id: string): GitCommitRef => ({ ...original, commitId: id.padEnd(40, "0"), parents: [] });
 

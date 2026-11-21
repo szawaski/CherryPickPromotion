@@ -47,6 +47,8 @@ const cherryPickTimeoutMs = 10 * 60 * 1000;
 export const maxCommitsPerCherryPick = 50;
 // Azure DevOps rejects a pull request description over 4,000 characters.
 export const maxDescriptionLength = 4000;
+// Azure DevOps rejects a pull request title over 400 characters.
+const maxTitleLength = 400;
 const minDescriptionLineLength = 20;
 
 export async function analyzePromotion(client: AdoClient, repository: GitRepository, sourceBranch: string, targetBranch: string, progress: Progress): Promise<PromotionPlan> {
@@ -272,11 +274,13 @@ export function buildPlan(
     for (const { planCommit } of planned) planCommit.inOpenPullRequest = openPromotions.get(planCommit.commit.commitId);
 
     // A merge commit already on the target (Azure DevOps cherry-picks a pull request as its merge commit)
-    // brings the commits it merged in with it. Newest first so nested merges pass the reason down.
+    // brings the commits it merged in with it: those reachable from its other parents but not its mainline. That set
+    // already covers nested merges, so only merges on the target in their own right pass a reason down. A nested merge
+    // marked here doesn't: it's measured against its own mainline, so a "merge main into the feature branch" commit
+    // would hand the reason to commits from main that the outer merge never brought.
     const byId = new Map(planned.map(p => [p.planCommit.commit.commitId, p.planCommit]));
-    for (let i = planned.length - 1; i >= 0; i--) {
-        const merge = planned[i].planCommit;
-        if (!merge.isMerge || !merge.promotedReason) continue;
+    const promotedMerges = planned.map(p => p.planCommit).filter(c => c.isMerge && c.promotedReason);
+    for (const merge of promotedMerges.reverse()) {
         const [mainline, ...mergedIn] = merge.commit.parents!;
         const onMainline = reachable(byId, [mainline]);
         for (const id of reachable(byId, mergedIn)) {
@@ -334,13 +338,37 @@ export function selectWorkItemIds(plan: PromotionPlan, selectedKeys: ReadonlySet
         .sort((a, b) => a - b);
 }
 
-/** The templated title, after the linked work item's title when there is one. */
-export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<string>, workItemTitle?: string): string {
+/**
+ * "[target] " followed by: the linked work item's number and title when there is one; else the one item's title, with
+ * its work items in front unless the title already names them; else every selected work item's number, then the pull
+ * request or commit of each item without one.
+ */
+export function defaultTitle(plan: PromotionPlan, selectedKeys: ReadonlySet<string>, workItem?: { id: number; title: string }): string {
+    const prefix = `[${plan.targetBranch}]`;
+    const tag = (ids: number[]) => ids.map(id => `#${id}`).join(" ");
+    let title: string;
     const items = plan.items.filter(i => selectedKeys.has(i.key) && i.hasPendingCommits);
-    const pullRequests = items.filter(i => i.pullRequest).length;
-    const commits = selectCommits(plan, selectedKeys).length;
-    const title = `Promote ${pullRequests} PRs ${commits} commits ${plan.sourceBranch} to ${plan.targetBranch}`;
-    return workItemTitle?.trim() ? `${workItemTitle.trim()}: ${title}` : title;
+    if (workItem?.title.trim()) {
+        title = `${tag([workItem.id])} ${workItem.title.trim()}`;
+    } else if (items.length === 1) {
+        const item = items[0];
+        const itemTitle = (item.pullRequest ? item.pullRequest.title : firstLine(item.commits[0].commit.comment)).trim();
+        const unnamed = [...item.workItemIds].sort((a, b) => a - b).filter(id => !new RegExp(`#${id}(?!\\d)`).test(itemTitle));
+        title = unnamed.length > 0 ? `${tag(unnamed)} ${itemTitle}` : itemTitle;
+    } else {
+        // An item without work items is named by its pull request, or its commit when it has none.
+        const ids = items.reduce<number[]>((all, i) => mergeIds(all, i.workItemIds), []).sort((a, b) => a - b);
+        const unlinked = items.filter(i => i.workItemIds.length === 0).map(i => (i.pullRequest ? `!${i.pullRequest.pullRequestId}` : i.commits[0].commit.commitId.substring(0, 8)));
+        title = [tag(ids), ...unlinked].filter(Boolean).join(" ");
+    }
+    return shorten(`${prefix} ${title}`, maxTitleLength);
+}
+
+/** Cuts the text at the last space within max characters, ending it with an ellipsis. */
+function shorten(text: string, max: number): string {
+    if (text.length <= max) return text;
+    const cut = text.lastIndexOf(" ", max - 1);
+    return `${text.substring(0, cut > 0 ? cut : max - 1)}…`;
 }
 
 /** A list of the items' titles: the pull request's, or a commit's first line. */

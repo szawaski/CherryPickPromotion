@@ -162,6 +162,14 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
         // The next block moves into this one's place.
         setTimeout(() => reveal(resultEditor.current!, findBlocks(model)[Math.min(blockIndex, Math.max(0, findBlocks(model).length - 1))]));
     };
+    const original = file.merged!;
+    const changed = model.getValue() !== original;
+    // An edit rather than setValue, so Ctrl+Z still brings back what was there before the reset.
+    const reset = () => {
+        model.pushEditOperations([], [{ range: model.getFullModelRange(), text: original }], () => null);
+        setBlockIndex(0);
+        reveal(resultEditor.current!, findBlocks(model)[0]);
+    };
 
     return (
         <div className="cpp-conflict-text">
@@ -177,6 +185,9 @@ function TextConflict({ file, model, labels }: { file: ConflictFile; model: mona
                 <button disabled={!current} onClick={() => take("current")}>Take current</button>
                 <button disabled={!current} onClick={() => take("incoming")}>Take incoming</button>
                 <button disabled={!current} onClick={() => take("both")}>Take both</button>
+                <button disabled={!changed} onClick={reset} title="Put back every conflict in this file and undo all edits to it">
+                    Reset file
+                </button>
             </div>
             <div className="cpp-conflict-labels">
                 <span>Result (editable)</span>

@@ -8,7 +8,7 @@ Promote work from one branch to another without merging the whole branch.
 
 The selected items are cherry-picked in order onto a new branch, and one pull request is opened into the target, linking their work items. The title follows your selection until you edit it. The description lists the titles of the pull requests and commits it includes.
 
-Enter a **Work item** ID to link it to the pull request as well and put its title in front of the pull request title, e.g. **Release 2.3: Promote 3 PRs 5 commits develop to main**. It's remembered for later promotions until you change or clear it. Check **Auto-complete** to have it complete once policies pass.
+Enter a **Work item** ID to link it to the pull request as well and title the pull request after it, e.g. **[main] #1234 Release 2.3**. Otherwise one item is titled like **[main] #135359 Mark time records as exported**, and several by their work items, like **[main] #138415 #138421 #139213**. It's remembered for later promotions until you change or clear it. Check **Auto-complete** to have it complete once policies pass.
 
 ## What's listed
 

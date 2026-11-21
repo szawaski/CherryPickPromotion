@@ -5,13 +5,13 @@
 Promote work from a source branch to a target branch in Azure DevOps by cherry-picking it into one pull request.
 
 1. Pick a repository, source and target branch, then **Find changes**. Source-only commits are listed by pull request, newest first.
-2. Check what to promote and select **Cherry-pick**. Items are cherry-picked in landing order onto `cherry-pick/<target>/<timestamp>-<n>`, and one pull request is opened with their work items linked. The title defaults to `Promote <n> PRs <n> commits <source> to <target>`.
+2. Check what to promote and select **Cherry-pick**. Items are cherry-picked in landing order onto `cherry-pick/<target>/<timestamp>-<n>`, and one pull request is opened with their work items linked. The title defaults to `[<target>] #<work item> <title>` for one item and `[<target>] #<id> #<id> …` for several.
 
 User-facing behavior is in [web/overview.md](web/overview.md). Implementation notes:
 
 - **Already promoted** means the commit is on the target, in a completed PR into it, or matches a cherry-pick from an earlier promotion by author, author date and first message line. Then `matchContentOnTarget` checks file contents: a commit counts if the target's blob for every file it changed is the one it left, a later source version, or the source head's (deletes match when the file is gone). Lookups that fail leave the commit listed. It costs one changes call per remaining commit and two item lookups per file.
 - **Dependencies**: `findDependencies` runs at the end of `matchContentOnTarget` with no extra calls. For each file a commit to promote changes, the earlier commits to promote in its history that changed that file, back to the version the target has, are dependencies (a failed lookup counts). It works by file, not line, so it can warn about edits that wouldn't conflict.
-- **Pull request details**: the description is `promotionDescription`, one line per included item. Azure DevOps allows 4,000 characters, so `fitLines` shortens the longest lines to a shared width (at least 20) and, past that, replaces the last lines with a count. The **Work item** field is saved per project, added to `workItemIds`, and its title prefixes `defaultTitle` as `<title>: `.
+- **Pull request details**: the description is `promotionDescription`, one line per included item. Azure DevOps allows 4,000 characters, so `fitLines` shortens the longest lines to a shared width (at least 20) and, past that, replaces the last lines with a count. The **Work item** field is saved per project, added to `workItemIds`, and when set, `defaultTitle` uses it as `[<target>] #<id> <title>`.
 - **Auto-complete** sets `autoCompleteSetBy` to the PR's creator with `deleteSourceBranch`. If that fails, the PR is kept and the status says why.
 - **Conflicts**: the editor pushes the resolved commit with its original author, date and message. **Abort** throws `PromotionAborted`, and the branches made so far are deleted.
 - **Group by work item** loads work items and their `System.Parent` chain through `wit/workitemsbatch` on first use. Work items that are deleted or unreadable show as "not found or no access".

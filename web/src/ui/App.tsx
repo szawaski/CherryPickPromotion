@@ -149,7 +149,7 @@ export function App({ client }: Props) {
             clearTimeout(timer);
         };
     }, [client, workItemId]);
-    const workItemTitle = linkedWorkItem?.state === "found" ? linkedWorkItem.title : undefined;
+    const linkedTitle = linkedWorkItem?.state === "found" ? { id: linkedWorkItem.id, title: linkedWorkItem.title } : undefined;
 
     function changeGrouping(value: boolean) {
         setGroupByWorkItems(value);
@@ -178,6 +178,13 @@ export function App({ client }: Props) {
         setPlan(undefined);
         setBranches([]);
         setRepositoryId(id);
+    }
+
+    // The list, and the buttons acting on it, belong to the branches it was found for, so changing either clears it.
+    function changeBranch(update: (branch: string) => void, branch: string) {
+        autoFind.current = false;
+        setPlan(undefined);
+        update(branch);
     }
 
     async function run(action: () => Promise<void>) {
@@ -248,7 +255,7 @@ export function App({ client }: Props) {
             const resolveConflict: ResolveConflict = request => new Promise(resolve => setPendingConflict({ request, resolve }));
             let result;
             try {
-                result = await createPromotionPullRequest(client, repository, plan, selected, { title: title.trim() || defaultTitle(plan, selected, workItemTitle), workItemId }, progress, resolveConflict);
+                result = await createPromotionPullRequest(client, repository, plan, selected, { title: title.trim() || defaultTitle(plan, selected, linkedTitle), workItemId }, progress, resolveConflict);
             } catch (error) {
                 if (!(error instanceof PromotionAborted)) throw error;
                 setStatus({ kind: "info", message: "Aborted. No pull request was created, and the branches made along the way were removed." });
@@ -306,7 +313,7 @@ export function App({ client }: Props) {
     const selectedWorkItems = plan ? new Set([...selectWorkItemIds(plan, selected), ...(workItemId === undefined ? [] : [workItemId])]).size : 0;
     const missing = plan ? missingDependencies(plan, selected) : new Map<string, ItemDependency[]>();
     const missingCount = new Set([...missing.values()].flatMap(d => d.map(x => x.key))).size;
-    const title = customTitle ?? (plan ? defaultTitle(plan, selected, workItemTitle) : "");
+    const title = customTitle ?? (plan ? defaultTitle(plan, selected, linkedTitle) : "");
     const selectable = visibleItems.filter(i => i.hasPendingCommits);
     const allSelected = selectable.length > 0 && selectable.every(i => selected.has(i.key));
 
@@ -391,11 +398,11 @@ export function App({ client }: Props) {
                 </label>
                 <label>
                     Source branch
-                    <BranchSelect branches={branches} value={sourceBranch} disabled={busy} onChange={setSourceBranch} />
+                    <BranchSelect branches={branches} value={sourceBranch} disabled={busy} onChange={b => changeBranch(setSourceBranch, b)} />
                 </label>
                 <label>
                     Target branch
-                    <BranchSelect branches={branches} value={targetBranch} disabled={busy} onChange={setTargetBranch} />
+                    <BranchSelect branches={branches} value={targetBranch} disabled={busy} onChange={b => changeBranch(setTargetBranch, b)} />
                 </label>
                 <button className="cpp-icon" title="Reload branches" aria-label="Reload branches" disabled={busy || !repository} onClick={() => setBranchesVersion(v => v + 1)}>
                     <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
@@ -608,6 +615,7 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
     const openPullRequests = all.filter(i => i.openPullRequest).length;
     const toPromote = selectable.length;
     const hasConflict = conflictKey !== undefined && all.some(i => i.key === conflictKey);
+    const earliest = all.map(itemDate).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
     return (
         <li className="cpp-group">
             <div className="cpp-row cpp-group-row">
@@ -661,7 +669,7 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
                 {hasConflict && <span className="cpp-tag cpp-tag-conflict">conflicts</span>}
                 {toPromote > 0 && toPromote < all.length && <span className="cpp-tag">{toPromote} to promote</span>}
                 <span className="cpp-meta">
-                    {all.length} items{count > 0 ? ` · ${count} selected` : ""}
+                    {all.length} items{count > 0 ? ` · ${count} selected` : ""}{earliest ? ` · since ${formatDate(earliest)}` : ""}
                 </span>
             </div>
             {!isCollapsed && (
@@ -721,7 +729,7 @@ function ItemRow({ item, repository, checked, expanded, conflict, disabled, need
                     </button>
                 )}
                 <span className="cpp-meta">
-                    {pullRequest ? pullRequest.createdBy.displayName : last!.author.name} · {formatDate(pullRequest ? (pullRequest.closedDate ?? pullRequest.creationDate) : last!.author.date)}
+                    {pullRequest ? pullRequest.createdBy.displayName : last!.author.name} · {formatDate(itemDate(item))}
                 </span>
                 <span className="cpp-workitems">
                     {item.workItemIds.map(id => (
@@ -800,6 +808,12 @@ function matchesFilter(item: PlanItem, query: string): boolean {
             c.commit.author.name.toLowerCase().includes(query) ||
             c.commit.author.email.toLowerCase().includes(query)
     );
+}
+
+/** When the item landed: its pull request's completion (or creation, while open), else its last commit. */
+function itemDate(item: PlanItem): string {
+    const pullRequest = item.pullRequest;
+    return pullRequest ? (pullRequest.closedDate ?? pullRequest.creationDate) : item.commits[item.commits.length - 1].commit.author.date;
 }
 
 function formatDate(value: string): string {

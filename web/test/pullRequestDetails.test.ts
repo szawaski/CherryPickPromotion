@@ -19,10 +19,33 @@ const plan = buildPlan("develop", "main", source, [], { byMergeCommit: new Map([
 const all = new Set(plan.items.map(i => i.key));
 
 describe("defaultTitle", () => {
-    it("puts the work item's title in front", () => {
-        expect(defaultTitle(plan, all)).toBe("Promote 1 PRs 2 commits develop to main");
-        expect(defaultTitle(plan, all, " Release 2.3 ")).toBe("Release 2.3: Promote 1 PRs 2 commits develop to main");
-        expect(defaultTitle(plan, all, "  ")).toBe("Promote 1 PRs 2 commits develop to main");
+    it("lists the work items of several items", () => {
+        expect(defaultTitle(plan, all)).toBe("[main] #5");
+    });
+
+    it("uses the one item's title, naming its work items unless the title already does", () => {
+        expect(defaultTitle(plan, new Set(["pr:7"]))).toBe("[main] #5 Feature PR");
+        const named = buildPlan("develop", "main", [commit("c", "#5 Fix it")], [], { byMergeCommit: new Map(), byCommit: new Map() });
+        expect(defaultTitle(named, new Set(named.items.map(i => i.key)))).toBe("[main] #5 Fix it");
+        const prefixOnly = buildPlan("develop", "main", [commit("c", "#55 Fix it")], [], { byMergeCommit: new Map(), byCommit: new Map() });
+        expect(defaultTitle(prefixOnly, new Set(prefixOnly.items.map(i => i.key)))).toBe("[main] #5 #55 Fix it");
+    });
+
+    it("uses the linked work item when there is one", () => {
+        expect(defaultTitle(plan, all, { id: 12, title: " Release 2.3 " })).toBe("[main] #12 Release 2.3");
+        expect(defaultTitle(plan, all, { id: 12, title: "  " })).toBe("[main] #5");
+    });
+
+    it("names items without work items by their pull request or commit", () => {
+        const source = [{ ...commit("f", "Tidy more", ["e"]), workItems: [] }, { ...commit("e", "Tidy", ["d"]), workItems: [] }, commit("d", "Linked")];
+        const mixed = buildPlan("develop", "main", source, [], { byMergeCommit: new Map([["f".repeat(40), [pr(9, "Tidy PR")]]]), byCommit: new Map() });
+        expect(defaultTitle(mixed, new Set(mixed.items.map(i => i.key)))).toBe("[main] #5 eeeeeeee !9");
+    });
+
+    it("stays within Azure DevOps's 400 characters", () => {
+        const long = defaultTitle(plan, new Set(["pr:7"]), { id: 1, title: "word ".repeat(200) });
+        expect(long.length).toBeLessThanOrEqual(400);
+        expect(long.endsWith("…")).toBe(true);
     });
 });
 
