@@ -524,3 +524,45 @@ html, body {
 .cpp-group-children {
     padding-left: 24px;
 }
+
+/* The confirmation before creating a pull request. */
+.cpp-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.cpp-dialog {
+    max-width: 640px;
+    margin: 16px;
+    padding: 16px 20px;
+    border: 1px solid var(--cpp-border);
+    border-radius: 6px;
+    background: var(--cpp-bg);
+    color: var(--cpp-text);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+}
+
+.cpp-dialog h2 {
+    margin: 0 0 8px;
+    font-size: 16px;
+}
+
+.cpp-dialog p {
+    margin: 0 0 10px;
+}
+
+.cpp-dialog .cpp-meta {
+    white-space: normal;
+}
+
+.cpp-dialog-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+}

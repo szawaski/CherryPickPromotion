@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { AdoClient, shortBranchName } from "../core/adoClient";
 import {
     analyzePromotion,
@@ -65,6 +65,8 @@ export function App({ client }: Props) {
     const [filter, setFilter] = useState("");
     const [conflictKey, setConflictKey] = useState<string>();
     const [pendingConflict, setPendingConflict] = useState<PendingConflict>();
+    // A pull request is created only after its confirmation, which also holds the Auto-complete choice.
+    const [confirming, setConfirming] = useState<"promote" | "sync">();
     // Undefined until edited, so the title follows the selection.
     const [customTitle, setCustomTitle] = useState<string>();
     // A work item linked to every promotion pull request, remembered until changed; its title prefixes the title.
@@ -241,12 +243,24 @@ export function App({ client }: Props) {
         });
     }
 
+    /** Why the Work item field can't be used yet, if it can't. */
+    function workItemProblem(): string | undefined {
+        if (!workItemInput.trim() || linkedWorkItem?.state === "found") return undefined;
+        return workItemId === undefined ? "The work item must be a number." : linkedWorkItem?.state === "missing" ? `Work item #${workItemId} wasn't found or you don't have access. Fix it or clear it.` : `Still loading work item #${workItemId}; try again in a moment.`;
+    }
+
+    function confirmPromotion() {
+        const problem = workItemProblem();
+        if (problem) setStatus({ kind: "error", message: problem });
+        else setConfirming("promote");
+    }
+
     function createPullRequest() {
         if (!repository || !plan) return;
-        if (workItemInput.trim() && linkedWorkItem?.state !== "found") {
+        if (workItemProblem()) {
             setStatus({
                 kind: "error",
-                message: workItemId === undefined ? "The work item must be a number." : linkedWorkItem?.state === "missing" ? `Work item #${workItemId} wasn't found or you don't have access. Fix it or clear it.` : `Still loading work item #${workItemId}; try again in a moment.`
+                message: workItemProblem()!
             });
             return;
         }
@@ -395,6 +409,53 @@ export function App({ client }: Props) {
 
     return (
         <div className="cpp">
+            {confirming === "promote" && plan && (
+                <ConfirmDialog
+                    title={`Cherry-pick into ${plan.targetBranch}?`}
+                    confirmLabel="Create pull request"
+                    autoComplete={autoComplete}
+                    autoCompleteNote="Completes on its own once its policies pass, with the target's default merge type, and deletes its branch."
+                    onAutoComplete={changeAutoComplete}
+                    onCancel={() => setConfirming(undefined)}
+                    onConfirm={() => {
+                        setConfirming(undefined);
+                        createPullRequest();
+                    }}
+                >
+                    <p>
+                        Cherry-picks {selected.size} {selected.size === 1 ? "item" : "items"} ({selectedCommits} {selectedCommits === 1 ? "commit" : "commits"}) from {plan.sourceBranch} onto a new branch and opens a pull request into {plan.targetBranch}, linking {selectedWorkItems} {selectedWorkItems === 1 ? "work item" : "work items"}. A conflict opens the conflict editor.
+                    </p>
+                    <p>
+                        <strong>Title:</strong> {title.trim() || defaultTitle(plan, selected, linkedTitle)}
+                    </p>
+                    {missingCount > 0 && (
+                        <p className="cpp-needs">
+                            ⚠ {missingCount} unselected earlier {missingCount === 1 ? "item changed" : "items changed"} the same files first; the selection likely needs {missingCount === 1 ? "it" : "them"}. Cancel and use Add needed items to include {missingCount === 1 ? "it" : "them"}.
+                        </p>
+                    )}
+                </ConfirmDialog>
+            )}
+            {confirming === "sync" && plan && syncPoint && (
+                <ConfirmDialog
+                    title={`Create a rebase PR into ${plan.targetBranch}?`}
+                    confirmLabel="Create rebase PR"
+                    autoComplete={autoComplete}
+                    autoCompleteNote="Completes on its own once its policies pass, as a Merge (no fast-forward) so the histories join, and deletes its branch."
+                    onAutoComplete={changeAutoComplete}
+                    onCancel={() => setConfirming(undefined)}
+                    onConfirm={() => {
+                        setConfirming(undefined);
+                        createSyncPull();
+                    }}
+                >
+                    <p>
+                        Opens a pull request that joins {plan.sourceBranch}'s history, up to {syncPoint.commit.commitId.substring(0, 8)} ({formatDate(syncPoint.commit.committer?.date ?? syncPoint.commit.author.date)}), to {plan.targetBranch}. It changes no files: its branch first sets the files both branches changed to {plan.targetBranch}'s versions.
+                    </p>
+                    <p>
+                        Once it's completed as a merge, {syncPoint.commitCount} commits come off this list. Complete it with <strong>Merge (no fast-forward)</strong>; a squash would leave the histories apart.
+                    </p>
+                </ConfirmDialog>
+            )}
             {pendingConflict && (
                 <Suspense fallback={<div className="cpp-conflict"><div className="cpp-status"><span className="cpp-spinner" />Loading the conflict editor…</div></div>}>
                     <ConflictEditor
@@ -477,7 +538,7 @@ export function App({ client }: Props) {
                                     )}
                                 </span>
                                 {syncPoint && (
-                                    <button disabled={busy} onClick={createSyncPull}>
+                                    <button disabled={busy} onClick={() => setConfirming("sync")}>
                                         Create rebase PR into {plan.targetBranch}
                                     </button>
                                 )}
@@ -567,10 +628,6 @@ export function App({ client }: Props) {
                                 Pull request title
                                 <input value={title} disabled={busy} onChange={e => setCustomTitle(e.target.value)} />
                             </label>
-                            <label className="cpp-check" title="Complete the pull request on its own once its policies pass, and delete its branch">
-                                <input type="checkbox" checked={autoComplete} disabled={busy} onChange={() => changeAutoComplete(!autoComplete)} />
-                                Auto-complete
-                            </label>
                             <span className="cpp-summary">
                                 {selected.size} items · {selectedCommits} commits · {selectedWorkItems} work items
                             </span>
@@ -591,7 +648,7 @@ export function App({ client }: Props) {
                             >
                                 Copy IDs
                             </button>
-                            <button className="cpp-primary" disabled={busy || selectedCommits === 0} onClick={createPullRequest}>
+                            <button className="cpp-primary" disabled={busy || selectedCommits === 0} onClick={confirmPromotion}>
                                 Cherry-pick into {plan.targetBranch}
                             </button>
                         </div>
@@ -876,6 +933,45 @@ function WorkItemLineage({ ids, workItems, repository }: { ids: number[]; workIt
                     })}
                 </span>
             ))}
+        </div>
+    );
+}
+
+/** A confirmation before creating a pull request, with the Auto-complete choice. Escape or the backdrop cancels. */
+function ConfirmDialog(props: {
+    title: string;
+    confirmLabel: string;
+    autoComplete: boolean;
+    autoCompleteNote: string;
+    children: ReactNode;
+    onAutoComplete(value: boolean): void;
+    onConfirm(): void;
+    onCancel(): void;
+}) {
+    const confirm = useRef<HTMLButtonElement>(null);
+    useEffect(() => {
+        confirm.current?.focus();
+        const onKey = (e: KeyboardEvent) => e.key === "Escape" && props.onCancel();
+        document.addEventListener("keydown", onKey);
+        return () => document.removeEventListener("keydown", onKey);
+    }, []);
+    return (
+        <div className="cpp-dialog-backdrop" onClick={e => e.target === e.currentTarget && props.onCancel()}>
+            <div className="cpp-dialog" role="dialog" aria-modal="true" aria-label={props.title}>
+                <h2>{props.title}</h2>
+                {props.children}
+                <label className="cpp-check" title={props.autoCompleteNote}>
+                    <input type="checkbox" checked={props.autoComplete} onChange={() => props.onAutoComplete(!props.autoComplete)} />
+                    Auto-complete
+                    <span className="cpp-meta"> {props.autoCompleteNote}</span>
+                </label>
+                <div className="cpp-dialog-buttons">
+                    <button onClick={props.onCancel}>Cancel</button>
+                    <button ref={confirm} className="cpp-primary" onClick={props.onConfirm}>
+                        {props.confirmLabel}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }

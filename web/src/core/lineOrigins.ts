@@ -182,15 +182,47 @@ export interface BlockSuggestion {
 /**
  * What the text alone says about a conflict block, before any dates:
  * - a side that already has every line of the other, in order, loses nothing when kept (contains);
- * - when both sides kept every line they started from and only added their own, neither replaced the other, so both
- *   belong (onlyAdded), as when two entries were added at the same spot.
+ * - when both sides kept every line they started from and only added their own, and what they added is different
+ *   things, neither replaced the other, so both belong (onlyAdded), as when two entries were added at the same spot.
+ *   Additions that read alike are two versions of the same entry instead, and keeping both would repeat it.
  * Otherwise a side really replaced the other's lines, and only the dates can suggest which.
  */
 export function suggestFromText(base: string[], current: string[], incoming: string[]): BlockSuggestion | undefined {
     if (incoming.length > 0 && isSubsequence(incoming, current)) return { side: "current", why: "contains" };
     if (current.length > 0 && isSubsequence(current, incoming)) return { side: "incoming", why: "contains" };
-    if (current.length > 0 && incoming.length > 0 && isSubsequence(base, current) && isSubsequence(base, incoming)) return { side: "both", why: "onlyAdded" };
+    if (current.length > 0 && incoming.length > 0 && isSubsequence(base, current) && isSubsequence(base, incoming)) {
+        const addedCurrent = withoutBase(base, current);
+        const addedIncoming = withoutBase(base, incoming);
+        const alike = addedCurrent.some(c => addedIncoming.some(i => readAlike(c, i)));
+        if (!alike) return { side: "both", why: "onlyAdded" };
+    }
     return undefined;
+}
+
+/** The lines a side added: all but the base lines it kept, in order. */
+function withoutBase(base: string[], lines: string[]): string[] {
+    const added: string[] = [];
+    let b = 0;
+    for (const line of lines) {
+        if (b < base.length && line === base[b]) b++;
+        else added.push(line);
+    }
+    return added;
+}
+
+/**
+ * Whether two lines say much the same thing: the same text, or at least three words of three letters or more in
+ * common making up at least 40% of their words, like two wordings of one entry. "using B;" and "using Bee;" share only
+ * "using", so they're different things.
+ */
+function readAlike(a: string, b: string): boolean {
+    if (a.trim() !== "" && a.trim() === b.trim()) return true;
+    const words = (line: string) => new Set((line.toLowerCase().match(/[a-z0-9_]+/g) ?? []).filter(w => w.length >= 3));
+    const wa = words(a);
+    const wb = words(b);
+    const shared = [...wa].filter(w => wb.has(w)).length;
+    const all = new Set([...wa, ...wb]).size;
+    return shared >= 3 && shared / all >= 0.4;
 }
 
 /** A suggestion by dates for a block the text can't decide. */

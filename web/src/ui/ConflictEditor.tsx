@@ -119,6 +119,12 @@ export default function ConflictEditor({ request, onDone }: Props) {
     const leftText = left.map(x => `${x.f.path.split("/").pop()} (${x.n})`).join(", ");
     // The next file with something left, after the one shown.
     const nextLeft = left.find(x => x.i > fileIndex) ?? left[0];
+    // Once a file is resolved, on to the next one with anything left; with none left, stay to commit.
+    const advance = (resolvedChoices = choices) => {
+        const open = files.map((f, i) => ({ i, n: f.kind === "content" ? unresolvedInText(models.get(f.path)!.getValue()) : resolvedChoices.has(f.path) ? 0 : 1 })).filter(x => x.n > 0);
+        const next = open.find(x => x.i > fileIndex) ?? open[0];
+        if (next) setFileIndex(next.i);
+    };
     const file = files[fileIndex] as ConflictFile | undefined;
 
     function commitResolution() {
@@ -149,9 +155,16 @@ export default function ConflictEditor({ request, onDone }: Props) {
 
                 <div className="cpp-conflict-main">
                     {!file && <p>Azure DevOps reported a conflict, but every file in this commit merged cleanly here. Commit to continue.</p>}
-                    {file?.kind === "content" && <TextConflict key={file.path} file={file} model={models.get(file.path)!} labels={labels} dates={dates.get(file.path)} datesState={dates.get(file.path)?.state} />}
+                    {file?.kind === "content" && (
+                        <TextConflict key={file.path} file={file} model={models.get(file.path)!} labels={labels} dates={dates.get(file.path)} datesState={dates.get(file.path)?.state} onResolved={() => advance()} />
+                    )}
                     {file && file.kind !== "content" && (
-                        <WholeFileConflict key={file.path} file={file} labels={labels} choice={choices.get(file.path)} onChoose={c => setChoices(new Map(choices).set(file.path, c))} />
+                        <WholeFileConflict key={file.path} file={file} labels={labels} choice={choices.get(file.path)} onChoose={c => {
+                                const next = new Map(choices).set(file.path, c);
+                                setChoices(next);
+                                advance(next);
+                            }}
+                        />
                     )}
                 </div>
             </div>
@@ -180,7 +193,22 @@ export default function ConflictEditor({ request, onDone }: Props) {
     );
 }
 
-function TextConflict({ file, model, labels, dates, datesState }: { file: ConflictFile; model: monaco.editor.ITextModel; labels: ConflictRequest["labels"]; dates?: FileDates; datesState?: FileDates["state"] }) {
+function TextConflict({
+    file,
+    model,
+    labels,
+    dates,
+    datesState,
+    onResolved
+}: {
+    file: ConflictFile;
+    model: monaco.editor.ITextModel;
+    labels: ConflictRequest["labels"];
+    dates?: FileDates;
+    datesState?: FileDates["state"];
+    /** Called when a Take button resolves the file's last conflict; typing never moves on by itself. */
+    onResolved(): void;
+}) {
     const resultHost = useRef<HTMLDivElement>(null);
     const resultEditor = useRef<monaco.editor.IStandaloneCodeEditor>();
     const paint = useRef<() => void>();
@@ -234,6 +262,10 @@ function TextConflict({ file, model, labels, dates, datesState }: { file: Confli
             : new monaco.Range(current.start, 1, current.end + 1, 1);
         const text = kept.length === 0 ? "" : kept.join(eol) + (lastLine ? "" : eol);
         model.pushEditOperations([], [{ range, text }], () => null);
+        if (unresolvedInText(model.getValue()) === 0) {
+            onResolved();
+            return;
+        }
         // The next block moves into this one's place.
         setTimeout(() => reveal(resultEditor.current!, findBlocks(model)[Math.min(blockIndex, Math.max(0, findBlocks(model).length - 1))]));
     };

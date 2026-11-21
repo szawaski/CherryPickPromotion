@@ -93,3 +93,31 @@ describe("combineBoth", () => {
         expect(combineBoth(["x"], ["x", "a"], ["b"])).toEqual(["x", "a", "b"]);
     });
 });
+
+describe("suggestFromText with additions that read alike", () => {
+    it("doesn't suggest both when the sides added two versions of the same entry", () => {
+        // From run-sync-params.js: both kept the --reference line and added a --persist description, in different words.
+        const base = ["//   --reference   the GL Reference Number the Payroll > Sage Intacct Time Cards dialog asks for (136419)"];
+        const current = [
+            base[0],
+            "//   --jobs        the source-side Job/Location Ids filter (Spectrum to Time family); chips read back, REFUSED on a mismatch",
+            "//   --persist     Persist Mode is the \"Save Changes\" checkbox on most syncs, checked by default: None unchecks",
+            "//                 it (validate only), any other value checks it."
+        ];
+        const incoming = [
+            base[0],
+            "//   --persist     Persist Mode is now the \"Save Changes\" checkbox, checked by default: None unchecks it",
+            "//                 (validate only), any other value checks it; read back, and the run is REFUSED on a mismatch"
+        ];
+        expect(suggestFromText(base, current, incoming)).toBeUndefined();
+    });
+
+    it("still suggests both for different additions that share a word or two", () => {
+        expect(suggestFromText(["using A;", "using C;"], ["using A;", "using B;", "using C;"], ["using A;", "using Bee;", "using C;"])).toEqual({ side: "both", why: "onlyAdded" });
+        expect(suggestFromText([], ["services.AddScoped<IPayrollWriter, PayrollWriter>();"], ["services.AddScoped<ITimeReader, TimeReader>();"])).toEqual({ side: "both", why: "onlyAdded" });
+    });
+
+    it("doesn't suggest both when both sides added the same line", () => {
+        expect(suggestFromText([], ["x = 1;", "same line"], ["same line", "y = 2;"])).toBeUndefined();
+    });
+});
