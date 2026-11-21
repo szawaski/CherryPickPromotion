@@ -963,7 +963,6 @@ function ConfirmDialog(props: {
                 <label className="cpp-check" title={props.autoCompleteNote}>
                     <input type="checkbox" checked={props.autoComplete} onChange={() => props.onAutoComplete(!props.autoComplete)} />
                     Auto-complete
-                    <span className="cpp-meta"> {props.autoCompleteNote}</span>
                 </label>
                 <div className="cpp-dialog-buttons">
                     <button onClick={props.onCancel}>Cancel</button>

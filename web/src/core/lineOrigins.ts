@@ -173,7 +173,9 @@ export function suggestSide(current: (LineOrigin | undefined)[], incoming: (Line
 /** What to keep of a conflict block, and why: the text says (contains, onlyAdded) or the dates do. */
 export interface BlockSuggestion {
     side: "current" | "incoming" | "both";
-    why: "contains" | "onlyAdded" | "dates";
+    /** onlySide: the other side has no lines here; removed says whether it removed lines the base had. */
+    why: "contains" | "onlyAdded" | "onlySide" | "dates";
+    removed?: boolean;
     /** For a suggestion by dates: each side's newest line. */
     current?: LineOrigin;
     incoming?: LineOrigin;
@@ -188,6 +190,10 @@ export interface BlockSuggestion {
  * Otherwise a side really replaced the other's lines, and only the dates can suggest which.
  */
 export function suggestFromText(base: string[], current: string[], incoming: string[]): BlockSuggestion | undefined {
+    // One side has nothing here: keeping the other replaces nothing it has. If the empty side removed lines the base
+    // had, that's said, since keeping the other side undoes the removal.
+    if (current.length === 0 && incoming.length > 0) return { side: "incoming", why: "onlySide", removed: base.length > 0 };
+    if (incoming.length === 0 && current.length > 0) return { side: "current", why: "onlySide", removed: base.length > 0 };
     if (incoming.length > 0 && isSubsequence(incoming, current)) return { side: "current", why: "contains" };
     if (current.length > 0 && isSubsequence(current, incoming)) return { side: "incoming", why: "contains" };
     if (current.length > 0 && incoming.length > 0 && isSubsequence(base, current) && isSubsequence(base, incoming)) {

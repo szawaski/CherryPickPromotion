@@ -347,6 +347,10 @@ function baseFor(model: monaco.editor.ITextModel, dates: FileDates | undefined, 
 
 function suggestionText(s: BlockSuggestion): string {
     if (s.why === "onlyAdded") return "both, each side only added lines here and neither replaced the other's";
+    if (s.why === "onlySide") {
+        const other = s.side === "current" ? "incoming" : "current";
+        return s.removed ? `${s.side}, ${other} has none of these lines and ${s.side} changed them` : `${s.side}, it only adds lines and ${other} has none here`;
+    }
     if (s.why === "contains") return `${s.side}, it already has every ${s.side === "current" ? "incoming" : "current"} line`;
     const newer = (s.side === "current" ? s.current : s.incoming)!;
     const older = (s.side === "current" ? s.incoming : s.current)!;

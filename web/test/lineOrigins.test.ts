@@ -78,8 +78,14 @@ describe("suggestFromText", () => {
 
     it("leaves it to the dates when a side replaced the other's lines", () => {
         expect(suggestFromText(["value = 1"], ["value = 2"], ["value = 3"])).toBeUndefined();
-        // A side that deleted everything doesn't "contain" the other.
-        expect(suggestFromText(["a"], [], ["b"])).toBeUndefined();
+    });
+
+    it("suggests the only side with lines, saying when the other removed what the base had", () => {
+        // Release has none of the lines the incoming commit adds (a package block in a lock file, say).
+        expect(suggestFromText([], [], ["added", "lines"])).toEqual({ side: "incoming", why: "onlySide", removed: false });
+        // Current removed the base's lines while incoming changed them.
+        expect(suggestFromText(["a"], [], ["b"])).toEqual({ side: "incoming", why: "onlySide", removed: true });
+        expect(suggestFromText(["a"], ["b"], [])).toEqual({ side: "current", why: "onlySide", removed: true });
     });
 });
 
