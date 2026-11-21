@@ -11,6 +11,7 @@ import {
     firstLine,
     missingDependencies,
     pullRequestUrl,
+    cherryPickList,
     selectCommits,
     selectWorkItemIds,
     withDependencies,
@@ -108,8 +109,8 @@ export function App({ client }: Props) {
         if (repositoryId === saved.repositoryId && sourceBranch === saved.sourceBranch && targetBranch === saved.targetBranch) findChanges();
     }, [branches, busy]);
 
-    // Work items load the first time they're grouped by, along with their parents.
-    const missingWorkItems = groupByWorkItems && plan ? [...new Set(plan.items.flatMap(i => i.workItemIds))].filter(id => !workItems.has(id)) : [];
+    // Work items load with their parents, for the groups or, ungrouped, the line under each item.
+    const missingWorkItems = plan ? [...new Set(plan.items.flatMap(i => i.workItemIds))].filter(id => !workItems.has(id)) : [];
     useEffect(() => {
         if (missingWorkItems.length === 0) return;
         let current = true;
@@ -283,6 +284,17 @@ export function App({ client }: Props) {
         });
     }
 
+    async function copyCherryPickList() {
+        if (!plan) return;
+        const text = cherryPickList(plan, selected);
+        try {
+            await copyText(text);
+            setStatus({ kind: "success", message: `Copied ${text.split("\n").length} ids, oldest first.` });
+        } catch (error) {
+            setStatus({ kind: "error", message: `Copying failed: ${error instanceof Error ? error.message : String(error)}` });
+        }
+    }
+
     const syncSearch = useMemo(() => (plan ? findSyncPoint(plan) : {}), [plan]);
     const syncPoint = syncSearch.point;
     const syncBlocker = syncSearch.blockedBy;
@@ -307,7 +319,14 @@ export function App({ client }: Props) {
     // Items in an open promotion and open pull requests into the source stay visible, though they can't be selected.
     const shown = (i: PlanItem) => i.hasPendingCommits || i.promotedIn !== undefined || i.openPullRequest === true;
     // Loaded work items count too, parents included, so searching for a feature finds what's under it.
-    const visibleItems = plan ? plan.items.filter(i => (query ? matchesFilter(i, query) || workItemMatches(i, workItems, query) : showPromoted || shown(i))).reverse() : [];
+    // Newest first by the date each row shows; the plan's order breaks ties, and cherry-picks still apply oldest first.
+    const visibleItems = plan
+        ? plan.items
+              .map((item, order) => ({ item, order, date: Date.parse(itemDate(item) ?? "") || 0 }))
+              .filter(({ item: i }) => (query ? matchesFilter(i, query) || workItemMatches(i, workItems, query) : showPromoted || shown(i)))
+              .sort((a, b) => b.date - a.date || b.order - a.order)
+              .map(x => x.item)
+        : [];
     const hiddenCount = plan ? plan.items.filter(i => !shown(i)).length : 0;
     const selectedCommits = plan ? selectCommits(plan, selected).length : 0;
     const selectedWorkItems = plan ? new Set([...selectWorkItemIds(plan, selected), ...(workItemId === undefined ? [] : [workItemId])]).size : 0;
@@ -338,6 +357,7 @@ export function App({ client }: Props) {
             conflict={item.key === conflictKey}
             disabled={busy || !item.hasPendingCommits}
             needs={missing.get(item.key)}
+            workItems={groups ? undefined : workItems}
             onCheck={() => toggle(selected, item.key, setSelected)}
             onSelectNeeded={keys => setSelected(new Set([...selected, ...keys]))}
             onExpand={() => toggle(expanded, item.key, setExpanded)}
@@ -564,6 +584,13 @@ export function App({ client }: Props) {
                                     ⚠ Add {missingCount} needed {missingCount === 1 ? "item" : "items"}
                                 </button>
                             )}
+                            <button
+                                disabled={busy || selectedCommits === 0}
+                                title="Copy the selected pull request numbers and direct commit ids, one per line, oldest first, instead of creating a pull request"
+                                onClick={() => copyCherryPickList()}
+                            >
+                                Copy IDs
+                            </button>
                             <button className="cpp-primary" disabled={busy || selectedCommits === 0} onClick={createPullRequest}>
                                 Cherry-pick into {plan.targetBranch}
                             </button>
@@ -711,12 +738,14 @@ interface ItemRowProps {
     disabled: boolean;
     /** Unselected earlier items this one likely needs. */
     needs?: ItemDependency[];
+    /** Set when the list isn't grouped, to show each work item's parents on a line under the item. */
+    workItems?: WorkItemMap;
     onCheck(): void;
     onExpand(): void;
     onSelectNeeded(keys: string[]): void;
 }
 
-function ItemRow({ item, repository, checked, expanded, conflict, disabled, needs, onCheck, onExpand, onSelectNeeded }: ItemRowProps) {
+function ItemRow({ item, repository, checked, expanded, conflict, disabled, needs, workItems, onCheck, onExpand, onSelectNeeded }: ItemRowProps) {
     const pullRequest = item.pullRequest;
     const last = item.commits[item.commits.length - 1]?.commit;
     const dimmed = !item.hasPendingCommits && item.promotedIn === undefined;
@@ -762,6 +791,7 @@ function ItemRow({ item, repository, checked, expanded, conflict, disabled, need
                     </button>
                 )}
             </div>
+            {workItems && item.workItemIds.length > 0 && <WorkItemLineage ids={item.workItemIds} workItems={workItems} repository={repository} />}
             {pullRequest && expanded && (
                 <ul className="cpp-commits">
                     {[...item.commits].reverse().map(c => (
@@ -813,6 +843,60 @@ function needsSummary(keys: string[], missing: ReadonlyMap<string, ItemDependenc
     const names = (list: string[]) => list.map(itemLabel).join(", ");
     if (keys.length === 1) return `${itemLabel(keys[0])} needs ${needed.size <= 2 ? names([...needed]) : `${needed.size} items`}`;
     return `${keys.length} items need ${needed.size === 1 ? names([...needed]) : `${needed.size} others`}`;
+}
+
+/** Each work item with its parents above it, top first: "Feature #1 Title › Product Backlog Item #2 Title". */
+function WorkItemLineage({ ids, workItems, repository }: { ids: number[]; workItems: WorkItemMap; repository: GitRepository }) {
+    const chains = ids.map(id => {
+        const chain: number[] = [];
+        for (let current: number | undefined = id; current !== undefined && !chain.includes(current); current = workItems.get(current)?.parentId) chain.unshift(current);
+        return chain;
+    });
+    const describe = (id: number) => {
+        const workItem = workItems.get(id);
+        return workItem ? `${workItem.type} #${id} ${workItem.title}` : `#${id}`;
+    };
+    return (
+        <div className="cpp-lineage" title={chains.map(chain => chain.map(describe).join(" › ")).join("\n")}>
+            {chains.map((chain, c) => (
+                <span key={ids[c]}>
+                    {c > 0 && " · "}
+                    {chain.map((id, i) => {
+                        const workItem = workItems.get(id);
+                        return (
+                            <span key={id}>
+                                {i > 0 && " › "}
+                                {workItem && <span className="cpp-wi-type">{workItem.type}</span>}
+                                <a href={workItemUrl(repository, id)} target="_blank" rel="noopener noreferrer">
+                                    #{id}
+                                </a>{" "}
+                                {workItem?.title}
+                            </span>
+                        );
+                    })}
+                </span>
+            ))}
+        </div>
+    );
+}
+
+/** Copies text, falling back to a hidden text area where the clipboard API isn't allowed, as in some frames. */
+async function copyText(text: string): Promise<void> {
+    try {
+        await navigator.clipboard.writeText(text);
+        return;
+    } catch {
+        // fall back below
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    if (!copied) throw new Error("the browser didn't allow it");
 }
 
 /** The group and the groups under it that hold one of the items, so opening them shows each item. */

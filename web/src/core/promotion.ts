@@ -207,25 +207,36 @@ function browserReferenceCache(): ReferenceCache {
 }
 
 /**
- * Marks commits recommitted on the target by hand: a target commit with the same message, ignoring a "Merged PR n:"
- * prefix and leading [tags] (so a squash merge matches the commit it squashed), that changes exactly the same files.
- * The author and date can differ, and the target may have changed those files since. Only commits whose message
- * matches are looked up, two requests each; a failed lookup leaves the commit to promote.
+ * Marks commits recommitted on the target by hand, when a target commit changes exactly the same files and either:
+ * - has the same message, ignoring a "Merged PR n:" prefix and leading [tags] (so a squash merge matches the commit it
+ *   squashed); the author and date can differ;
+ * - or has the same author and the same author time to the second, with its message reworded (a cherry-pick whose
+ *   message was rewritten keeps both).
+ * The target may have changed those files since. Only commits with such a candidate are looked up, two requests each;
+ * a failed lookup leaves the commit to promote.
  */
 export async function matchMessageOnTarget(client: AdoClient, repository: GitRepository, plan: PromotionPlan, targetOnly: GitCommitRef[], progress: Progress): Promise<void> {
     const byMessage = new Map<string, GitCommitRef[]>();
+    const byAuthorTime = new Map<string, GitCommitRef[]>();
+    const add = (map: Map<string, GitCommitRef[]>, key: string, commit: GitCommitRef) => map.set(key, [...(map.get(key) ?? []), commit]);
+    const authorTime = (commit: GitCommitRef) => `${commit.author.email.toLowerCase()}|${Date.parse(commit.author.date)}`;
     for (const commit of targetOnly) {
         const message = normalizedMessage(commit.comment);
-        if (message) byMessage.set(message, [...(byMessage.get(message) ?? []), commit]);
+        if (message) add(byMessage, message, commit);
+        add(byAuthorTime, authorTime(commit), commit);
     }
     const candidates = plan.items
         .flatMap(i => i.commits)
         .filter(c => !c.isMerge && !c.promotedReason)
-        .map(c => [c, byMessage.get(normalizedMessage(c.commit.comment)) ?? []] as const)
+        .map(c => {
+            const sameMessage = byMessage.get(normalizedMessage(c.commit.comment)) ?? [];
+            const sameAuthorTime = (byAuthorTime.get(authorTime(c.commit)) ?? []).filter(t => !sameMessage.includes(t));
+            return [c, [...sameMessage.map(t => ({ commit: t, why: "message" })), ...sameAuthorTime.map(t => ({ commit: t, why: "author, time" }))]] as const;
+        })
         .filter(([, matches]) => matches.length > 0);
     if (candidates.length === 0) return;
 
-    progress(`Comparing ${candidates.length} commits with ${plan.targetBranch} commits of the same message…`);
+    progress(`Comparing ${candidates.length} commits with likely copies on ${plan.targetBranch}…`);
     const paths = new Map<string, Promise<string | undefined>>();
     // The files a commit changes, as one comparable string; undefined when they can't be read.
     const filesOf = (commitId: string) => {
@@ -243,8 +254,8 @@ export async function matchMessageOnTarget(client: AdoClient, repository: GitRep
         const files = await filesOf(commit.commit.commitId);
         if (!files) return;
         for (const match of matches) {
-            if ((await filesOf(match.commitId)) !== files) continue;
-            commit.promotedReason = `same message and files as ${match.commitId.substring(0, 8)} on ${plan.targetBranch}`;
+            if ((await filesOf(match.commit.commitId)) !== files) continue;
+            commit.promotedReason = `same ${match.why} and files as ${match.commit.commitId.substring(0, 8)} on ${plan.targetBranch}`;
             return;
         }
     });
@@ -497,6 +508,17 @@ export function selectCommits(plan: PromotionPlan, selectedKeys: ReadonlySet<str
         .flatMap(i => i.commits.filter(c => !c.isMerge && !c.promotedReason).sort((a, b) => a.order - b.order));
 }
 
+/**
+ * The selection's ids, one per line, oldest first: a pull request's number, or a direct commit's full id. Items
+ * already on the target are left out.
+ */
+export function cherryPickList(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): string {
+    return plan.items
+        .filter(i => selectedKeys.has(i.key) && i.hasPendingCommits)
+        .map(i => (i.pullRequest ? String(i.pullRequest.pullRequestId) : i.commits[i.commits.length - 1].commit.commitId))
+        .join("\n");
+}
+
 export function selectWorkItemIds(plan: PromotionPlan, selectedKeys: ReadonlySet<string>): number[] {
     return plan.items
         .filter(i => selectedKeys.has(i.key))
@@ -537,12 +559,16 @@ function shorten(text: string, max: number): string {
     return `${text.substring(0, cut > 0 ? cut : max - 1)}…`;
 }
 
-/** A list of the items' titles: the pull request's, or a commit's first line. */
+/**
+ * A line per item starting with its id, "!" and the pull request's number or a direct commit's short id, then its title
+ * (the pull request's, or the commit's first line). If that's over max, the titles are left out.
+ */
 export function promotionDescription(items: PlanItem[], max = maxDescriptionLength): string {
-    return fitLines(
-        items.map(i => `- ${(i.pullRequest ? i.pullRequest.title : firstLine(i.commits[0].commit.comment)).trim()}`),
-        max
-    );
+    const id = (i: PlanItem) => (i.pullRequest ? `!${i.pullRequest.pullRequestId}` : i.commits[0].commit.commitId.substring(0, 8));
+    const title = (i: PlanItem) => (i.pullRequest ? i.pullRequest.title : firstLine(i.commits[0].commit.comment)).trim();
+    // Titles only while everything fits; past the limit, just the ids, which are what a later run looks for.
+    const titled = items.map(i => `- ${id(i)} ${title(i)}`).join("\n");
+    return titled.length <= max ? titled : fitLines(items.map(i => `- ${id(i)}`), max);
 }
 
 /**

@@ -150,3 +150,25 @@ describe("matchReferencesOnTarget", () => {
         expect(reads).toEqual([id("x")]);
     });
 });
+
+describe("matchMessageOnTarget with a reworded message", () => {
+    it("matches the same author, author time and files, but not a different time", async () => {
+        const at = (name: string, parents: string[], date: string, comment: string) => ({ ...commit(name, parents), author: { name: "Geoff", email: "Geoff@Example.com", date }, comment });
+        const source = [at("b", ["a"], "2026-10-06T15:00:00Z", "#135534 Sage 100 Target Date QA defects"), at("a", [], "2026-10-05T09:00:00Z", "docs: add a section")];
+        const plan = buildPlan("develop", "main", source, [], { byMergeCommit: new Map(), byCommit: new Map() });
+        const target = [
+            // b, its message rewritten when it was cherry-picked; the author time is kept.
+            { ...at("x", [], "2026-10-06T15:00:00.000Z", "135534: the pay preload dropped salaries"), author: { name: "Geoff", email: "geoff@example.com", date: "2026-10-06T15:00:00.000Z" } },
+            // The same person changing the same file a day later is a different change.
+            at("y", [], "2026-10-06T09:00:00Z", "docs: set auto-complete")
+        ];
+        const files: Record<string, GitChange[]> = { b: [edit("/s.cs", "1")], x: [edit("/s.cs", "2")], a: [edit("/AGENTS.md", "3")], y: [edit("/AGENTS.md", "4")] };
+        const client = { getCommitChanges: async (_repo: string, commitId: string) => files[commitId[0]] ?? [] } as unknown as AdoClient;
+
+        await matchMessageOnTarget(client, repository, plan, target, () => {});
+
+        const reason = (name: string) => plan.items.flatMap(i => i.commits).find(c => c.commit.commitId === id(name))!.promotedReason;
+        expect(reason("b")).toBe(`same author, time and files as ${id("x").substring(0, 8)} on main`);
+        expect(reason("a")).toBeUndefined();
+    });
+});

@@ -198,6 +198,21 @@ html, body {
     gap: 6px;
 }
 
+/* Ungrouped, the line under an item naming its work items and their parents; lined up with the item's name. */
+.cpp-lineage {
+    margin: -6px 4px 6px 36px;
+    color: var(--cpp-muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cpp-lineage .cpp-wi-type {
+    margin-right: 4px;
+    font-size: 11px;
+}
+
 .cpp-tag {
     margin-left: 8px;
     padding: 1px 6px;

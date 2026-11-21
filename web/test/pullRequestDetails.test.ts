@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdoClient } from "../src/core/adoClient";
-import { buildPlan, createPromotionPullRequest, defaultTitle, fitLines, promotionDescription } from "../src/core/promotion";
+import { buildPlan, cherryPickList, createPromotionPullRequest, defaultTitle, fitLines, promotionDescription } from "../src/core/promotion";
 import type { GitCommitRef, GitPullRequest, GitRepository } from "../src/core/types";
 
 const repository: GitRepository = { id: "repo", name: "repo", webUrl: "https://dev.azure.com/org/project/_git/repo" };
@@ -50,8 +50,12 @@ describe("defaultTitle", () => {
 });
 
 describe("promotionDescription", () => {
-    it("lists pull request titles and commit first lines in landing order", () => {
-        expect(promotionDescription(plan.items)).toBe("- Feature PR\n- Fix the thing");
+    it("starts each line with the pull request number or commit id, then the title, in landing order", () => {
+        expect(promotionDescription(plan.items)).toBe("- !7 Feature PR\n- bbbbbbbb Fix the thing");
+    });
+
+    it("leaves the titles out when they don't fit", () => {
+        expect(promotionDescription(plan.items, 30)).toBe("- !7\n- bbbbbbbb");
     });
 });
 
@@ -102,6 +106,12 @@ describe("createPromotionPullRequest details", () => {
         await vi.runAllTimersAsync();
         await result;
 
-        expect(createPullRequest).toHaveBeenCalledWith("repo", expect.objectContaining({ title: "Release: Promote", description: "- Feature PR\n- Fix the thing", workItemIds: [5, 7] }));
+        expect(createPullRequest).toHaveBeenCalledWith("repo", expect.objectContaining({ title: "Release: Promote", description: "- !7 Feature PR\n- bbbbbbbb Fix the thing", workItemIds: [5, 7] }));
+    });
+});
+
+describe("cherryPickList", () => {
+    it("lists the selected pull request numbers and direct commit ids, oldest first", () => {
+        expect(cherryPickList(plan, all).split("\n")).toEqual(["7", "b".repeat(40)]);
     });
 });
