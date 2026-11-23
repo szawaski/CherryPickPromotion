@@ -1,5 +1,6 @@
 import { AdoClient, fullBranchName, shortBranchName } from "./adoClient";
 import { conflictLineOrigins, type FileOrigins } from "./lineOrigins";
+import { linkToRelease } from "./workItems";
 import { buildPushChanges, prepareMerge, type ConflictFile, type ConflictLabels, type FileResolution } from "./conflicts";
 import type {
     GitChange,
@@ -616,6 +617,8 @@ function truncate(text: string, width: number): string {
  * resolveConflict (when given) gets to resolve it, and the resolved commit is pushed before carrying on. If it's skipped,
  * or there is no resolveConflict, only the items that landed before the conflicting one are kept, so the pull request
  * holds everything up to it and no item is promoted halfway. Its description lists the included items' titles.
+ * With details.workItemId, the included items' backlog items then get a Related link to it and a tag of its title
+ * (see linkToRelease).
  */
 export async function createPromotionPullRequest(
     client: AdoClient,
@@ -703,7 +706,17 @@ export async function createPromotionPullRequest(
                 workItemIds: details.workItemId === undefined ? selectWorkItemIds(plan, included) : mergeIds(selectWorkItemIds(plan, included), [details.workItemId])
             })
         );
-        return { pullRequest, includedKeys: [...included], conflict, resolvedConflicts };
+        let release: PromotionResult["release"];
+        if (details.workItemId !== undefined) {
+            // The pull request stands either way, so a failure here is only reported.
+            progress(`Linking the work items to #${details.workItemId}…`);
+            try {
+                release = await linkToRelease(client, selectWorkItemIds(plan, included), details.workItemId);
+            } catch (error) {
+                release = { releaseId: details.workItemId, updated: [], unchanged: [], failed: [{ id: details.workItemId, message: error instanceof Error ? error.message : String(error) }] };
+            }
+        }
+        return { pullRequest, includedKeys: [...included], conflict, resolvedConflicts, release };
     } catch (error) {
         // Without a pull request nothing is kept, unless only the pull request failed and its branch is ready to use.
         if (!creatingPullRequest) finalBranch = undefined;

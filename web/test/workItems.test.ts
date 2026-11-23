@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdoClient } from "../src/core/adoClient";
 import type { PlanItem, WorkItem } from "../src/core/types";
-import { groupByWorkItem, groupItems, itemDate, loadWorkItems, workItemMatches, type WorkItemGroup } from "../src/core/workItems";
+import { groupByWorkItem, groupItems, itemDate, linkToRelease, loadWorkItems, releaseTag, releaseTargets, workItemMatches, type WorkItemGroup } from "../src/core/workItems";
 
 const item = (key: string, workItemIds: number[]): PlanItem => ({ key, commits: [], workItemIds, hasPendingCommits: true });
 const workItem = (id: number, parentId?: number): WorkItem => ({ id, title: `WI ${id}`, type: "Task", state: "Active", parentId });
@@ -99,5 +99,71 @@ describe("itemDate", () => {
         const open = { pullRequestId: 1, title: "PR", status: "active" as const, sourceRefName: "refs/heads/f", targetRefName: "refs/heads/develop", creationDate: "2026-11-01T00:00:00Z", createdBy: { displayName: "Dev" } };
         expect(itemDate({ ...item("pr:1", []), pullRequest: open })).toBe("2026-11-01T00:00:00Z");
         expect(itemDate({ ...item("commit:c", []), landedAt: "2026-10-05T00:00:00Z" })).toBe("2026-10-05T00:00:00Z");
+    });
+});
+
+describe("release linking", () => {
+    const typed = (id: number, type: string, title: string, parentId?: number): WorkItem => ({ id, title, type, state: "Active", parentId });
+    // Feature 1 > Release PBI 2 "Release 2.3" > Release task 3; Feature 1 > PBI 10 > Task 100; Bug 20 on its own.
+    const all = [
+        typed(1, "Feature", "Platform"),
+        typed(2, "Product Backlog Item", "Release 2.3", 1),
+        typed(3, "Task", "Deploy", 2),
+        typed(10, "Product Backlog Item", "Export", 1),
+        typed(100, "Task", "Write it", 10),
+        typed(20, "Bug", "Crash")
+    ];
+    const map = new Map(all.map(w => [w.id, w]));
+
+    it("tags with the release's nearest non-Task title", () => {
+        expect(releaseTag(3, map)).toBe("Release 2.3");
+        expect(releaseTag(2, map)).toBe("Release 2.3");
+        expect(releaseTag(3, new Map([[3, typed(3, "Task", "Deploy")]]))).toBeUndefined();
+        expect(releaseTag(5, new Map([[5, typed(5, "Bug", "a; b")]]))).toBe("a, b");
+    });
+
+    it("links each task's backlog item once and leaves out the release and the ones above it", () => {
+        expect(releaseTargets([100, 10, 20, 2, 1, 3], 3, map)).toEqual([10, 20]);
+    });
+
+    it("adds only the link and tag each backlog item is missing", async () => {
+        const updateWorkItem = vi.fn(async () => {});
+        const client = {
+            getWorkItems: async (ids: number[]) => all.filter(w => ids.includes(w.id)),
+            workItemUrl: (id: number) => `https://dev.azure.com/org/_apis/wit/workItems/${id}`,
+            getWorkItemLinks: async () => [
+                { id: 10, tags: ["Old"], relations: [] },
+                { id: 20, tags: ["release 2.3"], relations: [{ rel: "System.LinkTypes.Related", url: "https://dev.azure.com/org/_apis/wit/workItems/3" }] }
+            ],
+            updateWorkItem
+        } as unknown as AdoClient;
+
+        const result = await linkToRelease(client, [100, 20], 3);
+
+        expect(result).toEqual({ releaseId: 3, tag: "Release 2.3", updated: [10], unchanged: [20], failed: [] });
+        expect(updateWorkItem).toHaveBeenCalledTimes(1);
+        expect(updateWorkItem).toHaveBeenCalledWith(10, [
+            { op: "add", path: "/relations/-", value: { rel: "System.LinkTypes.Related", url: "https://dev.azure.com/org/_apis/wit/workItems/3" } },
+            { op: "add", path: "/fields/System.Tags", value: "Old; Release 2.3" }
+        ]);
+    });
+
+    it("notes a work item it can't update and carries on", async () => {
+        const client = {
+            getWorkItems: async (ids: number[]) => all.filter(w => ids.includes(w.id)),
+            workItemUrl: (id: number) => `https://dev.azure.com/org/_apis/wit/workItems/${id}`,
+            getWorkItemLinks: async () => [
+                { id: 10, tags: [], relations: [] },
+                { id: 20, tags: [], relations: [] }
+            ],
+            updateWorkItem: async (id: number) => {
+                if (id === 10) throw new Error("denied");
+            }
+        } as unknown as AdoClient;
+
+        const result = await linkToRelease(client, [10, 20], 2);
+
+        expect(result.updated).toEqual([20]);
+        expect(result.failed).toEqual([{ id: 10, message: "denied" }]);
     });
 });
