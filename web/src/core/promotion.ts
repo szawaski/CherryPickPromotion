@@ -838,8 +838,8 @@ export async function createSyncPullRequest(client: AdoClient, repository: GitRe
                 "",
                 "**Complete it with Merge (no fast-forward).** A squash merge would leave the histories apart and the commits listed again.",
                 "",
-                `It changes no files. ${plan.targetBranch} took newer versions of some files through later promotions, so the branch's last commit sets the ` +
-                    `${toAlign.length} files both branches changed back to ${plan.targetBranch}'s versions, and merging leaves ${plan.targetBranch} as it is.`
+                `It changes no files. ${plan.targetBranch} took newer versions of some files through later promotions, so the branch's last commit replaces ${plan.sourceBranch}'s versions of the ` +
+                    `${toAlign.length} files both branches changed with ${plan.targetBranch}'s, and merging leaves ${plan.targetBranch} as it is.`
             ].join("\n"),
             workItemIds: [],
             mergeStrategy: "noFastForward"
