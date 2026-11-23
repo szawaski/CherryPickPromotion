@@ -1,5 +1,5 @@
 import type { AdoClient } from "./adoClient";
-import type { PlanItem, WorkItem } from "./types";
+import type { PlanItem, ReleaseLinkResult, WorkItem, WorkItemPatch } from "./types";
 
 /** Work items by id; undefined for ones that are deleted or can't be read, so they aren't asked for again. */
 export type WorkItemMap = ReadonlyMap<number, WorkItem | undefined>;
@@ -107,6 +107,90 @@ export function workItemMatches(item: PlanItem, workItems: WorkItemMap, query: s
         }
     }
     return false;
+}
+
+const relatedLink = "System.LinkTypes.Related";
+
+function isTask(workItem: WorkItem): boolean {
+    return workItem.type.trim().toLowerCase() === "task";
+}
+
+/** The work item itself when it isn't a Task, else its nearest ancestor that isn't; undefined when there is none. */
+export function nonTaskAncestor(id: number, workItems: WorkItemMap): number | undefined {
+    const seen = new Set<number>();
+    for (let current: number | undefined = id; current !== undefined && !seen.has(current); current = workItems.get(current)?.parentId) {
+        seen.add(current);
+        const workItem = workItems.get(current);
+        if (!workItem) return undefined;
+        if (!isTask(workItem)) return current;
+    }
+    return undefined;
+}
+
+/** The release's tag: the title of the release work item, or its nearest non-Task ancestor, without the ";" tags are split on. */
+export function releaseTag(releaseId: number, workItems: WorkItemMap): string | undefined {
+    const id = nonTaskAncestor(releaseId, workItems);
+    const title = id === undefined ? undefined : workItems.get(id)?.title.replace(/;/g, ",").trim();
+    return title ? title : undefined;
+}
+
+/**
+ * The backlog items to link to the release: each work item's nearest non-Task ancestor (a task's backlog item), once
+ * each, leaving out the release work item and the ones above it.
+ */
+export function releaseTargets(ids: Iterable<number>, releaseId: number, workItems: WorkItemMap): number[] {
+    const above = new Set<number>();
+    for (let current: number | undefined = releaseId; current !== undefined && !above.has(current); current = workItems.get(current)?.parentId) above.add(current);
+    const targets = new Set<number>();
+    for (const id of ids) {
+        const target = nonTaskAncestor(id, workItems);
+        if (target !== undefined && !above.has(target)) targets.add(target);
+    }
+    return [...targets].sort((a, b) => a - b);
+}
+
+/**
+ * Links the backlog items behind ids to the release work item with a Related link and tags them with the release's
+ * title (see releaseTag and releaseTargets). Links and tags they already have are left alone. A work item that can't
+ * be updated is noted in failed rather than stopping the others.
+ */
+export async function linkToRelease(client: AdoClient, ids: Iterable<number>, releaseId: number): Promise<ReleaseLinkResult> {
+    const workItems = await loadWorkItems(client, [...ids, releaseId], new Map());
+    if (!workItems.get(releaseId)) throw new Error(`Work item #${releaseId} wasn't found or you don't have access.`);
+    const tag = releaseTag(releaseId, workItems);
+    const targets = releaseTargets(ids, releaseId, workItems);
+    const result: ReleaseLinkResult = { releaseId, tag, updated: [], unchanged: [], failed: [] };
+    if (targets.length === 0) return result;
+
+    const releaseUrl = client.workItemUrl(releaseId).toLowerCase();
+    const linksTo = (url: string) => url.toLowerCase() === releaseUrl || url.toLowerCase().endsWith(`/workitems/${releaseId}`);
+    const current = new Map((await client.getWorkItemLinks(targets)).map(w => [w.id, w]));
+    for (const id of targets) {
+        const links = current.get(id);
+        if (!links) {
+            result.failed.push({ id, message: "not found or no access" });
+            continue;
+        }
+        const operations: WorkItemPatch[] = [];
+        if (!links.relations.some(r => r.rel === relatedLink && linksTo(r.url))) {
+            operations.push({ op: "add", path: "/relations/-", value: { rel: relatedLink, url: client.workItemUrl(releaseId) } });
+        }
+        if (tag && !links.tags.some(t => t.toLowerCase() === tag.toLowerCase())) {
+            operations.push({ op: "add", path: "/fields/System.Tags", value: [...links.tags, tag].join("; ") });
+        }
+        if (operations.length === 0) {
+            result.unchanged.push(id);
+            continue;
+        }
+        try {
+            await client.updateWorkItem(id, operations);
+            result.updated.push(id);
+        } catch (error) {
+            if (error instanceof Error && error.name === "AbortError") throw error;
+            result.failed.push({ id, message: error instanceof Error ? error.message : String(error) });
+        }
+    }
+    return result;
 }
 
 function hasCycle(parentId: number, id: number, workItems: WorkItemMap): boolean {

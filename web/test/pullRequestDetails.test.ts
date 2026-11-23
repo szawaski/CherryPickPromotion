@@ -108,6 +108,31 @@ describe("createPromotionPullRequest details", () => {
 
         expect(createPullRequest).toHaveBeenCalledWith("repo", expect.objectContaining({ title: "Release: Promote", description: "- !7 Feature PR\n- bbbbbbbb Fix the thing", workItemIds: [5, 7] }));
     });
+
+    it("links and tags the included backlog items for the work item after creating the pull request", async () => {
+        vi.useFakeTimers();
+        const updateWorkItem = vi.fn(async () => {});
+        const workItems = [
+            { id: 5, title: "Fix", type: "Product Backlog Item", state: "Active" },
+            { id: 7, title: "Release 2.3", type: "Product Backlog Item", state: "Active" }
+        ];
+        const client = {
+            createCherryPick: async () => ({ cherryPickId: 1, status: "queued" }),
+            getCherryPick: async () => ({ cherryPickId: 1, status: "completed" }),
+            createPullRequest: async () => ({ pullRequestId: 99 }),
+            deleteBranch: async () => {},
+            getWorkItems: async (ids: number[]) => workItems.filter(w => ids.includes(w.id)),
+            getWorkItemLinks: async () => [{ id: 5, tags: [], relations: [] }],
+            workItemUrl: (id: number) => `https://dev.azure.com/org/_apis/wit/workItems/${id}`,
+            updateWorkItem
+        } as unknown as AdoClient;
+
+        const result = createPromotionPullRequest(client, repository, plan, all, { title: "Release: Promote", workItemId: 7 }, () => {});
+        await vi.runAllTimersAsync();
+
+        expect((await result).release).toEqual({ releaseId: 7, tag: "Release 2.3", updated: [5], unchanged: [], failed: [] });
+        expect(updateWorkItem).toHaveBeenCalledWith(5, expect.arrayContaining([expect.objectContaining({ path: "/fields/System.Tags", value: "Release 2.3" })]));
+    });
 });
 
 describe("cherryPickList", () => {

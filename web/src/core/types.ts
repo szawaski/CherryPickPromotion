@@ -141,6 +141,31 @@ export interface PromotionResult {
     conflict?: { commit: GitCommitRef; itemKey?: string };
     /** Conflicts resolved in the editor along the way. */
     resolvedConflicts: number;
+    /** How the included work items were linked to and tagged for the pull request's work item, when it has one. */
+    release?: ReleaseLinkResult;
+}
+
+export interface ReleaseLinkResult {
+    releaseId: number;
+    /** The title of the release work item, or its nearest ancestor that isn't a Task; undefined when it has none. */
+    tag?: string;
+    /** Backlog items that got the link or the tag. */
+    updated: number[];
+    /** Backlog items that already had both. */
+    unchanged: number[];
+    failed: { id: number; message: string }[];
+}
+
+export interface WorkItemLinks {
+    id: number;
+    tags: string[];
+    relations: { rel: string; url: string }[];
+}
+
+export interface WorkItemPatch {
+    op: "add" | "replace" | "remove" | "test";
+    path: string;
+    value?: unknown;
 }
 
 export interface WorkItem {
