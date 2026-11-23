@@ -21,7 +21,7 @@ import {
     type ConflictRequest,
     type ResolveConflict
 } from "../core/promotion";
-import type { GitPullRequest, GitRepository, ItemDependency, PlanCommit, PlanItem, PromotionPlan } from "../core/types";
+import type { GitPullRequest, GitRepository, ItemDependency, PlanCommit, PlanItem, PromotionPlan, ReleaseLinkResult } from "../core/types";
 import { groupByWorkItem, groupItems, itemDate, loadWorkItems, workItemMatches, type WorkItemGroup, type WorkItemMap } from "../core/workItems";
 import "./styles.css";
 
@@ -278,7 +278,8 @@ export function App({ client }: Props) {
             }
             const id = result.pullRequest.pullRequestId;
             const included = new Set(result.includedKeys);
-            const resolvedNote = (result.resolvedConflicts > 0 ? ` Resolved ${result.resolvedConflicts} conflicting commits.` : "") + (await applyAutoComplete(result.pullRequest, false));
+            const resolvedNote =
+                (result.resolvedConflicts > 0 ? ` Resolved ${result.resolvedConflicts} conflicting commits.` : "") + releaseNote(result.release) + (await applyAutoComplete(result.pullRequest, false));
 
             setPlan({ ...plan, items: plan.items.map(i => (included.has(i.key) ? { ...i, promotedIn: id, hasPendingCommits: false } : i)) });
             setSelected(new Set([...selected].filter(key => !included.has(key))));
@@ -895,6 +896,17 @@ function CommitSummary({ commit, repository, hideReason }: { commit: PlanCommit;
 
 /** "!123" for a pull request item, the short commit id for a commit item. */
 /** A short label for items that need others: names while it's short, counts once it isn't (the tooltip lists them). */
+/** What linking and tagging the backlog items for the release did, for the status line. */
+function releaseNote(release: ReleaseLinkResult | undefined): string {
+    if (!release) return "";
+    const ids = (list: number[]) => list.map(id => `#${id}`).join(", ");
+    const done = [...release.updated, ...release.unchanged];
+    let note = "";
+    if (done.length > 0) note += ` Linked ${ids(done)} to #${release.releaseId}${release.tag ? ` and tagged ${done.length === 1 ? "it" : "them"} "${release.tag}"` : ""}.`;
+    for (const failure of release.failed) note += ` Couldn't link or tag #${failure.id}: ${failure.message}`;
+    return note;
+}
+
 function needsSummary(keys: string[], missing: ReadonlyMap<string, ItemDependency[]>): string {
     const needed = new Set(keys.flatMap(key => missing.get(key)!.map(d => d.key)));
     const names = (list: string[]) => list.map(itemLabel).join(", ");

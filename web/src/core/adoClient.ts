@@ -10,7 +10,9 @@ import type {
     GitRepository,
     PullRequestMatches,
     ResourceRef,
-    WorkItem
+    WorkItem,
+    WorkItemLinks,
+    WorkItemPatch
 } from "./types";
 
 export interface AdoConnection {
@@ -333,6 +335,39 @@ export class AdoClient {
         return workItems;
     }
 
+    /** Work items' tags and links, for adding to them; ones that are deleted or can't be read are left out. */
+    async getWorkItemLinks(ids: number[]): Promise<WorkItemLinks[]> {
+        const workItems: WorkItemLinks[] = [];
+        for (let i = 0; i < ids.length; i += workItemBatchSize) {
+            // Relations can't be asked for alongside a field list, so every field comes back.
+            const result = await this.send<{ value: ({ id: number; fields: Record<string, unknown>; relations?: { rel: string; url: string }[] } | null)[] }>(
+                "POST",
+                this.apiUrl("wit/workitemsbatch"),
+                { ids: ids.slice(i, i + workItemBatchSize), $expand: "Relations", errorPolicy: "omit" }
+            );
+            for (const item of result.value) {
+                if (!item) continue;
+                const tags = String(item.fields["System.Tags"] ?? "");
+                workItems.push({
+                    id: item.id,
+                    tags: tags.split(";").map(t => t.trim()).filter(t => t.length > 0),
+                    relations: (item.relations ?? []).map(r => ({ rel: r.rel, url: r.url }))
+                });
+            }
+        }
+        return workItems;
+    }
+
+    /** The URL other work items link to this one by. */
+    workItemUrl(id: number): string {
+        return `${this.connection.baseUrl}_apis/wit/workItems/${id}`;
+    }
+
+    /** Applies JSON Patch operations to a work item, e.g. adding a field value or a link. */
+    async updateWorkItem(id: number, operations: WorkItemPatch[]): Promise<void> {
+        await this.send("PATCH", this.apiUrl(`wit/workitems/${id}`), operations, "application/json-patch+json");
+    }
+
     /** Turns on auto-complete as userId, so the pull request completes once its policies pass. */
     setAutoComplete(repositoryId: string, pullRequestId: number, userId: string, completionOptions: { deleteSourceBranch?: boolean; mergeStrategy?: MergeStrategy }): Promise<GitPullRequest> {
         return this.send("PATCH", this.gitUrl(`repositories/${repositoryId}/pullrequests/${pullRequestId}`), { autoCompleteSetBy: { id: userId }, completionOptions });
@@ -351,15 +386,15 @@ export class AdoClient {
         return `${this.connection.baseUrl}${encodeURIComponent(this.connection.project)}/_apis/${path}?${params}`;
     }
 
-    private async send<T>(method: string, url: string, body?: unknown): Promise<T> {
-        const response = await this.fetch(method, url, body);
+    private async send<T>(method: string, url: string, body?: unknown, contentType?: string): Promise<T> {
+        const response = await this.fetch(method, url, body, undefined, contentType);
         return (await response.json()) as T;
     }
 
-    private async fetch(method: string, url: string, body?: unknown, accept = "application/json"): Promise<Response> {
+    private async fetch(method: string, url: string, body?: unknown, accept = "application/json", requestType = "application/json"): Promise<Response> {
         this.signal?.throwIfAborted();
         const headers: Record<string, string> = { Accept: accept, ...(await this.connection.getHeaders()) };
-        if (body !== undefined) headers["Content-Type"] = "application/json";
+        if (body !== undefined) headers["Content-Type"] = requestType;
 
         const response = await this.fetchWithRetry(method, url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: this.signal });
         if (!response.ok) {
