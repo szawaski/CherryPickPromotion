@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { AdoClient, shortBranchName } from "../core/adoClient";
 import {
     analyzePromotion,
@@ -14,7 +14,6 @@ import {
     cherryPickList,
     selectCommits,
     selectWorkItemIds,
-    withDependencies,
     workItemUrl,
     PromotionAborted,
     type ConflictAnswer,
@@ -63,6 +62,10 @@ export function App({ client }: Props) {
     // Work item groups start collapsed.
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
     const [filter, setFilter] = useState("");
+    // Set by a dependency badge or link: the list shows only those items until it's cleared, which scrolls back.
+    const [dependencyFilter, setDependencyFilter] = useState<DependencyFilter>();
+    const restoreScroll = useRef<number>();
+    const toolbar = useRef<HTMLElement>(null);
     const [conflictKey, setConflictKey] = useState<string>();
     const [pendingConflict, setPendingConflict] = useState<PendingConflict>();
     // A pull request is created only after its confirmation, which also holds the Auto-complete choice.
@@ -179,6 +182,7 @@ export function App({ client }: Props) {
     function changeRepository(id: string) {
         autoFind.current = false;
         setPlan(undefined);
+        setDependencyFilter(undefined);
         setBranches([]);
         setRepositoryId(id);
     }
@@ -187,6 +191,7 @@ export function App({ client }: Props) {
     function changeBranch(update: (branch: string) => void, branch: string) {
         autoFind.current = false;
         setPlan(undefined);
+        setDependencyFilter(undefined);
         update(branch);
     }
 
@@ -234,6 +239,7 @@ export function App({ client }: Props) {
                 return;
             }
             setPlan(result);
+            setDependencyFilter(undefined);
             setConflictKey(undefined);
             setSelected(new Set());
             setExpanded(new Set());
@@ -329,7 +335,7 @@ export function App({ client }: Props) {
     }
 
     // A filter searches everything, including already promoted items.
-    const query = filter.trim().toLowerCase().replace(/^[!#]/, "");
+    const query = dependencyFilter ? "" : filter.trim().toLowerCase().replace(/^[!#]/, "");
     // Newest first for display; cherry-picks still apply oldest first.
     // Items in an open promotion and open pull requests into the source stay visible, though they can't be selected.
     const shown = (i: PlanItem) => i.hasPendingCommits || i.promotedIn !== undefined || i.openPullRequest === true;
@@ -338,7 +344,7 @@ export function App({ client }: Props) {
     const visibleItems = plan
         ? plan.items
               .map((item, order) => ({ item, order, date: Date.parse(itemDate(item) ?? "") || 0 }))
-              .filter(({ item: i }) => (query ? matchesFilter(i, query) || workItemMatches(i, workItems, query) : showPromoted || shown(i)))
+              .filter(({ item: i }) => (dependencyFilter ? dependencyFilter.keys.has(i.key) : query ? matchesFilter(i, query) || workItemMatches(i, workItems, query) : showPromoted || shown(i)))
               .sort((a, b) => b.date - a.date || b.order - a.order)
               .map(x => x.item)
         : [];
@@ -352,6 +358,25 @@ export function App({ client }: Props) {
     const allSelected = selectable.length > 0 && selectable.every(i => selected.has(i.key));
 
     const groups = groupByWorkItems && missingWorkItems.length === 0 ? groupByWorkItem(visibleItems, workItems) : undefined;
+
+    /** Shows only these dependencies, remembering where the list was scrolled to. */
+    function showDependencies(keys: string[], label: string) {
+        setDependencyFilter(current => ({ keys: new Set(keys), label, scrollTop: current?.scrollTop ?? scroller().scrollTop }));
+    }
+
+    function clearDependencyFilter() {
+        restoreScroll.current = dependencyFilter?.scrollTop;
+        setDependencyFilter(undefined);
+    }
+
+    useLayoutEffect(() => {
+        if (dependencyFilter) {
+            toolbar.current?.scrollIntoView({ block: "start" });
+        } else if (restoreScroll.current !== undefined) {
+            scroller().scrollTop = restoreScroll.current;
+            restoreScroll.current = undefined;
+        }
+    }, [dependencyFilter]);
 
     function selectAll(keys: string[], value: boolean) {
         const next = new Set(selected);
@@ -374,7 +399,7 @@ export function App({ client }: Props) {
             needs={missing.get(item.key)}
             workItems={groups ? undefined : workItems}
             onCheck={() => toggle(selected, item.key, setSelected)}
-            onSelectNeeded={keys => setSelected(new Set([...selected, ...keys]))}
+            onShowNeeded={keys => showDependencies(keys, `needed by ${itemLabel(item.key)}`)}
             onExpand={() => toggle(expanded, item.key, setExpanded)}
         />
     );
@@ -431,7 +456,7 @@ export function App({ client }: Props) {
                     </p>
                     {missingCount > 0 && (
                         <p className="cpp-needs">
-                            ⚠ {missingCount} unselected earlier {missingCount === 1 ? "item changed" : "items changed"} the same files first; the selection likely needs {missingCount === 1 ? "it" : "them"}. Cancel and use Add needed items to include {missingCount === 1 ? "it" : "them"}.
+                            ⚠ {missingCount} unselected earlier {missingCount === 1 ? "item changed" : "items changed"} the same files first; the selection likely needs {missingCount === 1 ? "it" : "them"}. Cancel and use {missingCount} needed {missingCount === 1 ? "item" : "items"} to see {missingCount === 1 ? "it" : "them"}.
                         </p>
                     )}
                 </ConfirmDialog>
@@ -546,7 +571,7 @@ export function App({ client }: Props) {
                             </div>
                         )
                     )}
-                    <section className="cpp-toolbar">
+                    <section className="cpp-toolbar" ref={toolbar}>
                         <label className="cpp-check">
                             <input
                                 type="checkbox"
@@ -556,6 +581,14 @@ export function App({ client }: Props) {
                             />
                             Select all
                         </label>
+                        {dependencyFilter ? (
+                            <span className="cpp-filter-badge">
+                                Showing {dependencyFilter.keys.size} {dependencyFilter.keys.size === 1 ? "dependency" : "dependencies"} {dependencyFilter.label}
+                                <button className="cpp-search-clear" title="Show the whole list again" aria-label="Clear dependency filter" onClick={clearDependencyFilter}>
+                                    ×
+                                </button>
+                            </span>
+                        ) : (
                         <span className="cpp-search">
                             <input value={filter} placeholder="Search PRs, commits, people" onChange={e => setFilter(e.target.value)} onKeyDown={e => e.key === "Escape" && setFilter("")} />
                             {filter && (
@@ -564,9 +597,10 @@ export function App({ client }: Props) {
                                 </button>
                             )}
                         </span>
+                        )}
                         {hiddenCount > 0 && (
                             <label className="cpp-check">
-                                <input type="checkbox" checked={showPromoted} disabled={query.length > 0} onChange={() => setShowPromoted(!showPromoted)} />
+                                <input type="checkbox" checked={showPromoted} disabled={query.length > 0 || dependencyFilter !== undefined} onChange={() => setShowPromoted(!showPromoted)} />
                                 Show {hiddenCount} already promoted
                             </label>
                         )}
@@ -591,13 +625,13 @@ export function App({ client }: Props) {
                                       repository={repository}
                                       selected={selected}
                                       expandedGroups={expandedGroups}
-                                      expandAll={query.length > 0}
+                                      expandAll={query.length > 0 || dependencyFilter !== undefined}
                                       conflictKey={conflictKey}
                                       missing={missing}
                                       disabled={busy}
                                       onSelect={selectAll}
                                       onExpand={key => toggle(expandedGroups, key, setExpandedGroups)}
-                                      onOpen={keys => setExpandedGroups(new Set([...expandedGroups, ...keys]))}
+                                      onShowNeeded={showDependencies}
                                       renderItem={renderItem}
                                   />
                               ))
@@ -636,10 +670,10 @@ export function App({ client }: Props) {
                                 <button
                                     className="cpp-link cpp-needs"
                                     disabled={busy}
-                                    title={`Earlier items that changed the same files; the selection was likely written on top of them:\n${[...missing].map(([key, deps]) => `${itemLabel(key)} needs ${deps.map(d => itemLabel(d.key)).join(", ")}`).join("\n")}`}
-                                    onClick={() => setSelected(withDependencies(plan, selected))}
+                                    title={`Earlier items that changed the same files; the selection was likely written on top of them:\n${[...missing].map(([key, deps]) => `${itemLabel(key)} needs ${deps.map(d => itemLabel(d.key)).join(", ")}`).join("\n")}\nClick to show only them.`}
+                                    onClick={() => showDependencies([...missing.values()].flatMap(d => d.map(x => x.key)), "needed by the selection")}
                                 >
-                                    ⚠ Add {missingCount} needed {missingCount === 1 ? "item" : "items"}
+                                    ⚠ {missingCount} needed {missingCount === 1 ? "item" : "items"}
                                 </button>
                             )}
                             <button
@@ -685,8 +719,8 @@ interface WorkItemGroupRowProps {
     disabled: boolean;
     onSelect(keys: string[], value: boolean): void;
     onExpand(key: string): void;
-    /** Opens these groups, leaving the rest as they are. */
-    onOpen(keys: string[]): void;
+    /** Filters the list to these dependencies. */
+    onShowNeeded(keys: string[], label: string): void;
     renderItem(item: PlanItem): ReactElement;
 }
 
@@ -764,8 +798,8 @@ function WorkItemGroupRow(props: WorkItemGroupRowProps) {
                 {needing.length > 0 && (
                     <button
                         className="cpp-tag cpp-tag-needs"
-                        title={`Selected items here changed files that unselected earlier items changed first:\n${needsText}\nClick to open the groups down to them.`}
-                        onClick={() => props.onOpen(groupsLeadingTo(group, new Set(needing.map(i => i.key))))}
+                        title={`Selected items here changed files that unselected earlier items changed first:\n${needsText}\nClick to show only them.`}
+                        onClick={() => props.onShowNeeded([...new Set(needing.flatMap(i => props.missing.get(i.key)!.map(d => d.key)))], `needed by ${group.id === undefined ? "No work item" : `#${group.id}`}`)}
                     >
                         ⚠ {needsSummary(needing.map(i => i.key), props.missing)}
                     </button>
@@ -800,10 +834,10 @@ interface ItemRowProps {
     workItems?: WorkItemMap;
     onCheck(): void;
     onExpand(): void;
-    onSelectNeeded(keys: string[]): void;
+    onShowNeeded(keys: string[]): void;
 }
 
-function ItemRow({ item, repository, checked, expanded, conflict, disabled, needs, workItems, onCheck, onExpand, onSelectNeeded }: ItemRowProps) {
+function ItemRow({ item, repository, checked, expanded, conflict, disabled, needs, workItems, onCheck, onExpand, onShowNeeded }: ItemRowProps) {
     const pullRequest = item.pullRequest;
     const last = item.commits[item.commits.length - 1]?.commit;
     const dimmed = !item.hasPendingCommits && item.promotedIn === undefined;
@@ -827,8 +861,8 @@ function ItemRow({ item, repository, checked, expanded, conflict, disabled, need
                     <button
                         className="cpp-tag cpp-tag-needs"
                         disabled={disabled}
-                        title={`Changes files that unselected earlier items changed first; select them too:\n${needs.map(d => `${itemLabel(d.key)}: ${d.paths.join(", ")}`).join("\n")}`}
-                        onClick={() => onSelectNeeded(needs.map(d => d.key))}
+                        title={`Changes files that unselected earlier items changed first; click to show only them:\n${needs.map(d => `${itemLabel(d.key)}: ${d.paths.join(", ")}`).join("\n")}`}
+                        onClick={() => onShowNeeded(needs.map(d => d.key))}
                     >
                         needs {needs.length <= 2 ? needs.map(d => itemLabel(d.key)).join(", ") : `${needs.length} items`}
                     </button>
@@ -1006,13 +1040,6 @@ async function copyText(text: string): Promise<void> {
     if (!copied) throw new Error("the browser didn't allow it");
 }
 
-/** The group and the groups under it that hold one of the items, so opening them shows each item. */
-function groupsLeadingTo(group: WorkItemGroup, keys: ReadonlySet<string>): string[] {
-    const below = group.children.flatMap(child => groupsLeadingTo(child, keys));
-    const holds = below.length > 0 || group.items.some(i => keys.has(i.key));
-    return holds ? [group.key, ...below] : [];
-}
-
 function itemLabel(key: string): string {
     return key.startsWith("pr:") ? `!${key.substring(3)}` : key.substring("commit:".length, "commit:".length + 8);
 }
@@ -1036,6 +1063,19 @@ function matchesFilter(item: PlanItem, query: string): boolean {
 
 function formatDate(value: string): string {
     return new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+interface DependencyFilter {
+    keys: ReadonlySet<string>;
+    /** What needs them, as in "needed by !123". */
+    label: string;
+    /** Where the list was scrolled to before, restored when the filter is cleared. */
+    scrollTop: number;
+}
+
+/** What scrolls the list: the page, inside the Azure DevOps frame. */
+function scroller(): Element {
+    return document.scrollingElement ?? document.documentElement;
 }
 
 type LinkedWorkItem = { id: number; state: "loading" | "missing" } | { id: number; state: "found"; title: string };

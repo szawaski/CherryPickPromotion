@@ -466,6 +466,17 @@ html, body {
     box-sizing: border-box;
 }
 
+.cpp-filter-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 30px 2px 10px;
+    border-radius: 12px;
+    background: rgba(202, 80, 16, 0.12);
+    color: #ca5010;
+    white-space: nowrap;
+}
+
 .cpp-search {
     position: relative;
     display: inline-flex;
